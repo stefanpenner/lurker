@@ -77,6 +77,11 @@ func (m Model) View() string {
 		return m.renderWithDialog(b.String())
 	}
 
+	// Confirm overlay
+	if m.focus == focusConfirm && m.confirmRepo != "" {
+		return m.renderConfirmDialog()
+	}
+
 	// Help overlay
 	if m.focus == focusHelp {
 		return m.renderHelpScreen()
@@ -477,6 +482,8 @@ func (m Model) renderFooter() string {
 		return footerStyle.Render(" Add repo: " + m.textInput.View())
 	case focusDialog, focusHelp:
 		return " " + helpLineDialog()
+	case focusConfirm:
+		return " " + fmtHelp("y", "confirm") + "  " + fmtHelp("n/esc", "cancel")
 	case focusFocus:
 		return " " + helpLineFocus()
 	default:
@@ -541,6 +548,20 @@ func (m Model) renderWithDialog(_ string) string {
 
 	dialog := dialogStyle.Render(d.String())
 
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, dialog)
+}
+
+func (m Model) renderConfirmDialog() string {
+	var d strings.Builder
+	d.WriteString(dialogTitleStyle.Render("Remove repo"))
+	d.WriteString("\n\n")
+	d.WriteString("Remove ")
+	d.WriteString(repoNameStyle.Render(m.confirmRepo))
+	d.WriteString(" and all its issues?")
+	d.WriteString("\n\n")
+	d.WriteString(fmtHelp("y", "confirm") + "  " + fmtHelp("n/esc", "cancel"))
+
+	dialog := dialogStyle.Render(d.String())
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, dialog)
 }
 

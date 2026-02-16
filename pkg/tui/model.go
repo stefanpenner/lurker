@@ -28,12 +28,13 @@ const (
 type focus int
 
 const (
-	focusList   focus = iota
-	focusLogs         // scrolling within an expanded issue's logs (legacy, kept for focus view)
-	focusDialog       // detail dialog open
-	focusInput        // text input for adding repo
-	focusFocus        // full-screen focus view of a single issue
-	focusHelp         // help screen overlay
+	focusList    focus = iota
+	focusLogs          // scrolling within an expanded issue's logs (legacy, kept for focus view)
+	focusDialog        // detail dialog open
+	focusInput         // text input for adding repo
+	focusFocus         // full-screen focus view of a single issue
+	focusHelp          // help screen overlay
+	focusConfirm       // confirmation dialog (e.g. remove repo)
 )
 
 // itemKind distinguishes tree items.
@@ -79,6 +80,7 @@ type Model struct {
 
 	// Dialog state
 	dialogIssue *watcher.TrackedIssue
+	confirmRepo string // repo pending removal confirmation
 
 	// Focus view state
 	focusIssue  *watcher.TrackedIssue
@@ -282,6 +284,19 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
+	// Confirmation dialog
+	if m.focus == focusConfirm {
+		switch key {
+		case "y", "enter":
+			m.removeSelectedRepoConfirmed()
+			m.focus = focusList
+		case "n", "esc":
+			m.confirmRepo = ""
+			m.focus = focusList
+		}
+		return nil
+	}
+
 	// Dialog mode (info or help)
 	if m.focus == focusDialog || m.focus == focusHelp {
 		if key == "esc" || key == "?" {
@@ -393,7 +408,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		m.focus = focusInput
 		return m.textInput.Focus()
 	case "R", "d":
-		m.removeSelectedRepo()
+		if repo := m.selectedRepo(); repo != "" {
+			m.confirmRepo = repo
+			m.focus = focusConfirm
+		}
 	case "?":
 		m.focus = focusHelp
 	}
@@ -557,8 +575,9 @@ func (m *Model) showDialog() {
 	}
 }
 
-func (m *Model) removeSelectedRepo() {
-	repo := m.selectedRepo()
+func (m *Model) removeSelectedRepoConfirmed() {
+	repo := m.confirmRepo
+	m.confirmRepo = ""
 	if repo == "" {
 		return
 	}
@@ -629,18 +648,26 @@ func (m *Model) launchClaudeFor(iss *watcher.TrackedIssue) tea.Cmd {
 	if iss == nil || iss.Workdir == "" {
 		return nil
 	}
-	c := exec.Command("claude")
-	c.Dir = iss.Workdir
-	env := os.Environ()
-	filtered := make([]string, 0, len(env))
-	for _, e := range env {
-		if !strings.HasPrefix(e, "ANTHROPIC_API_KEY=") &&
-			!strings.HasPrefix(e, "CLAUDECODE=") {
-			filtered = append(filtered, e)
+
+	key := issueKey(iss.Repo, iss.Number)
+	session := m.ptySessions[key]
+	if session == nil || session.isDone() {
+		var err error
+		session, err = newPtySession(iss.Workdir)
+		if err != nil {
+			m.appendLog(key, "PTY: "+err.Error())
+			return nil
 		}
+		m.ptySessions[key] = session
+		m.manager.SetIssuePTY(key, session)
 	}
-	c.Env = filtered
-	return tea.ExecProcess(c, func(err error) tea.Msg { return nil })
+
+	// Send claude command to the PTY shell, then attach
+	session.ptmx.Write([]byte("cd " + iss.Workdir + " && env -u ANTHROPIC_API_KEY -u CLAUDECODE claude\n"))
+
+	return tea.Exec(&ptyAttacher{session: session, label: key}, func(err error) tea.Msg {
+		return nil
+	})
 }
 
 // interactiveClaudeDoneMsg is sent when the user exits an interactive Claude session.
@@ -655,32 +682,31 @@ func (m *Model) takeoverClaudeFor(iss *watcher.TrackedIssue) tea.Cmd {
 		return nil
 	}
 
+	key := issueKey(iss.Repo, iss.Number)
+
 	// Stop automated processing if running
 	if isActive(iss.Status) {
 		m.manager.StopIssue(iss.Repo, iss.Number)
-		key := issueKey(iss.Repo, iss.Number)
 		m.appendLog(key, "⏸ Pausing automation — launching interactive session...")
 	}
 
-	repo := iss.Repo
-	num := iss.Number
-	workdir := iss.Workdir
-
-	// Launch interactive Claude with --continue to pick up where automation left off
-	c := exec.Command("claude", "--continue")
-	c.Dir = workdir
-	env := os.Environ()
-	filtered := make([]string, 0, len(env))
-	for _, e := range env {
-		if !strings.HasPrefix(e, "ANTHROPIC_API_KEY=") &&
-			!strings.HasPrefix(e, "CLAUDECODE=") {
-			filtered = append(filtered, e)
+	session := m.ptySessions[key]
+	if session == nil || session.isDone() {
+		var err error
+		session, err = newPtySession(iss.Workdir)
+		if err != nil {
+			m.appendLog(key, "PTY: "+err.Error())
+			return nil
 		}
+		m.ptySessions[key] = session
+		m.manager.SetIssuePTY(key, session)
 	}
-	c.Env = filtered
 
-	return tea.ExecProcess(c, func(err error) tea.Msg {
-		return interactiveClaudeDoneMsg{repo: repo, num: num, workdir: workdir}
+	// Send claude --continue to the PTY shell, then attach
+	session.ptmx.Write([]byte("cd " + iss.Workdir + " && env -u ANTHROPIC_API_KEY -u CLAUDECODE claude --continue\n"))
+
+	return tea.Exec(&ptyAttacher{session: session, label: key}, func(err error) tea.Msg {
+		return interactiveClaudeDoneMsg{repo: iss.Repo, num: iss.Number, workdir: iss.Workdir}
 	})
 }
 
