@@ -412,6 +412,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.confirmRepo = repo
 			m.focus = focusConfirm
 		}
+	case "S":
+		m.resumeAllPaused()
 	case "?":
 		m.focus = focusHelp
 	}
@@ -474,6 +476,21 @@ func (m *Model) toggleIssueProcessing() {
 		iss.Status = watcher.StatusReacted
 		iss.Error = ""
 		m.appendLog(key, "▶ Retrying")
+		m.expanded[key] = true
+	}
+}
+
+func (m *Model) resumeAllPaused() {
+	for i := range m.issues {
+		iss := &m.issues[i]
+		if iss.Status != watcher.StatusPaused {
+			continue
+		}
+		key := issueKey(iss.Repo, iss.Number)
+		m.ensurePtySession(key, m.ptyWorkdir(iss))
+		m.manager.StartIssue(iss.Repo, iss.Number)
+		iss.Status = watcher.StatusReacted
+		m.appendLog(key, "▶ Resumed")
 		m.expanded[key] = true
 	}
 }

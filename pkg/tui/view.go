@@ -655,6 +655,7 @@ func (m Model) renderHelpScreen() string {
 
 	section("Actions", [][2]string{
 		{"space", "Start / pause processing"},
+		{"S", "Resume all paused issues"},
 		{"a", "Approve & create PR"},
 		{"t", "Takeover — interactive Claude (--continue)"},
 		{"s", "Shell — persistent PTY (Ctrl+] to detach)"},
