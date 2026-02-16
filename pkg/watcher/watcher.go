@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/stefanpenner/lurker/pkg/github"
 )
 
 // EventKind identifies the type of watcher event.
@@ -79,6 +81,12 @@ func (s IssueStatus) String() string {
 	}
 }
 
+// IssuePTY is the interface used by processIssue to run shell commands
+// inside a persistent PTY session. Implemented by tui.ptySession.
+type IssuePTY interface {
+	RunCommand(ctx context.Context, cmd string) (int, error)
+}
+
 // IssueKey returns a composite key: "owner/repo#42".
 func IssueKey(repo string, num int) string {
 	return fmt.Sprintf("%s#%d", repo, num)
@@ -108,18 +116,20 @@ type State struct {
 type Manager struct {
 	baseDir      string
 	pollInterval time.Duration
+	ghClient     *github.Client
 	eventCh      chan Event
 	mu           sync.Mutex
 	watchers     map[string]context.CancelFunc
 	repoWatchers map[string]*Watcher
 	knownIssues  map[string]Issue
 	issueCtxs    map[string]context.CancelFunc
+	issuePTYs    map[string]IssuePTY // PTY sessions per issue key
 	state        State
 	statePath    string
 }
 
 // NewManager creates a Manager, loading persisted state from disk.
-func NewManager(baseDir string, pollInterval time.Duration) (*Manager, error) {
+func NewManager(baseDir string, pollInterval time.Duration, ghClient *github.Client) (*Manager, error) {
 	if err := os.MkdirAll(baseDir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating base dir: %w", err)
 	}
@@ -130,11 +140,13 @@ func NewManager(baseDir string, pollInterval time.Duration) (*Manager, error) {
 	return &Manager{
 		baseDir:      baseDir,
 		pollInterval: pollInterval,
+		ghClient:     ghClient,
 		eventCh:      make(chan Event, 100),
 		watchers:     make(map[string]context.CancelFunc),
 		repoWatchers: make(map[string]*Watcher),
 		knownIssues:  make(map[string]Issue),
 		issueCtxs:    make(map[string]context.CancelFunc),
+		issuePTYs:    make(map[string]IssuePTY),
 		state:        state,
 		statePath:    statePath,
 	}, nil
@@ -285,6 +297,20 @@ func (m *Manager) IsKnown(key string) bool {
 	return ok
 }
 
+// SetIssuePTY registers a PTY session for an issue's command execution.
+func (m *Manager) SetIssuePTY(key string, pty IssuePTY) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.issuePTYs[key] = pty
+}
+
+// GetIssuePTY returns the PTY session for an issue, if set.
+func (m *Manager) GetIssuePTY(key string) IssuePTY {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.issuePTYs[key]
+}
+
 // StoreIssue saves a discovered issue so StartIssue can look it up later.
 func (m *Manager) StoreIssue(repo string, issue Issue) {
 	m.mu.Lock()
@@ -354,7 +380,7 @@ func (m *Manager) startWatcher(repo string) {
 		BaseDir:      m.baseDir,
 	}
 
-	w := &Watcher{cfg: cfg, manager: m}
+	w := &Watcher{cfg: cfg, manager: m, ghClient: m.ghClient}
 	m.repoWatchers[repo] = w
 	go w.Run(ctx, m.eventCh)
 }
@@ -396,8 +422,9 @@ type Config struct {
 
 // Watcher polls GitHub for new issues and orchestrates processing.
 type Watcher struct {
-	cfg     Config
-	manager *Manager
+	cfg      Config
+	manager  *Manager
+	ghClient *github.Client
 }
 
 func (w *Watcher) emit(ch chan<- Event, kind EventKind, issueNum int, text string) {
@@ -431,16 +458,20 @@ func (w *Watcher) Run(ctx context.Context, eventCh chan<- Event) {
 // poll discovers new issues and emits EventIssueFound. It does NOT start
 // processing — the user triggers that via the TUI.
 func (w *Watcher) poll(ctx context.Context, eventCh chan<- Event) {
+	if w.ghClient == nil {
+		return
+	}
 	w.emit(eventCh, EventPollStart, 0, "Polling for new issues...")
 
-	issues, err := FetchOpenIssues(w.cfg.Repo)
+	ghIssues, err := w.ghClient.ListOpenIssues(ctx, w.cfg.Repo)
 	if err != nil {
 		w.emit(eventCh, EventError, 0, fmt.Sprintf("Poll failed: %v", err))
 		return
 	}
 
 	var newCount int
-	for _, iss := range issues {
+	for _, gi := range ghIssues {
+		iss := IssueFromGitHub(gi)
 		key := IssueKey(w.cfg.Repo, iss.Number)
 		if w.manager != nil && w.manager.IsKnown(key) {
 			continue
@@ -461,16 +492,35 @@ func (w *Watcher) poll(ctx context.Context, eventCh chan<- Event) {
 		newCount++
 	}
 
-	w.emit(eventCh, EventPollDone, 0, fmt.Sprintf("Found %d new issues (of %d open)", newCount, len(issues)))
+	w.emit(eventCh, EventPollDone, 0, fmt.Sprintf("Found %d new issues (of %d open)", newCount, len(ghIssues)))
 }
 
 // processIssue does the actual work: react, clone, run claude.
 // Called by Manager.StartIssue when the user triggers it.
+// All commands run inside the issue's PTY shell via RunCommand.
 func (w *Watcher) processIssue(ctx context.Context, eventCh chan<- Event, issue Issue) {
 	num := issue.Number
+	key := IssueKey(w.cfg.Repo, num)
+	pty := w.manager.GetIssuePTY(key)
+
+	// Helper: run a command in the PTY shell (or fall back to exec if no PTY)
+	run := func(cmd string) (int, error) {
+		if pty != nil {
+			return pty.RunCommand(ctx, cmd)
+		}
+		// Fallback: run directly (shouldn't happen in normal flow)
+		c := exec.CommandContext(ctx, "sh", "-c", cmd)
+		if err := c.Run(); err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				return exitErr.ExitCode(), nil
+			}
+			return -1, err
+		}
+		return 0, nil
+	}
 
 	// React with eyes
-	if err := AddReaction(w.cfg.Repo, num); err != nil {
+	if err := w.ghClient.AddReaction(ctx, w.cfg.Repo, num, "eyes"); err != nil {
 		if ctx.Err() != nil {
 			return
 		}
@@ -490,7 +540,7 @@ func (w *Watcher) processIssue(ctx context.Context, eventCh chan<- Event, issue 
 
 	w.emit(eventCh, EventCloneStart, num, "Cloning repository...")
 
-	if err := w.cloneRepo(ctx, issueDir, workdir, num); err != nil {
+	if err := w.cloneRepo(ctx, run, issueDir, workdir, num); err != nil {
 		if ctx.Err() != nil {
 			return
 		}
@@ -514,11 +564,21 @@ func (w *Watcher) processIssue(ctx context.Context, eventCh chan<- Event, issue 
 	if repoCfg.PromptPrefix != "" {
 		prompt = repoCfg.PromptPrefix + "\n\n" + prompt
 	}
-	logFn := func(line string) {
-		w.emit(eventCh, EventClaudeLog, num, line)
+
+	// Write prompt to a file so we can pipe it to claude in the shell
+	promptFile := filepath.Join(issueDir, ".lurker-prompt.txt")
+	if err := os.WriteFile(promptFile, []byte(prompt), 0o644); err != nil {
+		w.emit(eventCh, EventError, num, fmt.Sprintf("Write prompt: %v", err))
+		return
 	}
 
-	_, err := RunClaude(ctx, workdir, prompt, repoCfg.ClaudeTools(), logFn)
+	// Build claude command — strip ANTHROPIC_API_KEY via env -u
+	tools := repoCfg.ClaudeTools()
+	claudeCmd := fmt.Sprintf(
+		"cd %s && env -u ANTHROPIC_API_KEY -u CLAUDECODE claude -p --verbose --allowedTools %s < %s",
+		shellQuote(workdir), shellQuote(tools), shellQuote(promptFile))
+
+	code, err := run(claudeCmd)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
@@ -527,12 +587,25 @@ func (w *Watcher) processIssue(ctx context.Context, eventCh chan<- Event, issue 
 		w.emit(eventCh, EventError, num, err.Error())
 		return
 	}
+	if code != 0 {
+		w.emit(eventCh, EventClaudeDone, num, fmt.Sprintf("Claude exited with code %d", code))
+		w.emit(eventCh, EventError, num, fmt.Sprintf("Claude exited with code %d", code))
+		return
+	}
 
 	w.emit(eventCh, EventClaudeDone, num, "Claude finished successfully")
 	w.emit(eventCh, EventReady, num, workdir)
 }
 
-func (w *Watcher) cloneRepo(ctx context.Context, issueDir, workdir string, issueNum int) error {
+// shellQuote wraps a string in single quotes for safe shell interpolation.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
+// runFunc is the signature for running a shell command in the PTY.
+type runFunc func(cmd string) (int, error)
+
+func (w *Watcher) cloneRepo(ctx context.Context, run runFunc, issueDir, workdir string, issueNum int) error {
 	bareDir := filepath.Join(w.cfg.BaseDir, w.cfg.Repo, "bare.git")
 
 	// Ensure bare clone exists
@@ -540,25 +613,33 @@ func (w *Watcher) cloneRepo(ctx context.Context, issueDir, workdir string, issue
 		if err := os.MkdirAll(filepath.Dir(bareDir), 0o755); err != nil {
 			return fmt.Errorf("mkdir: %w", err)
 		}
-		cmd := exec.CommandContext(ctx, "gh", "repo", "clone", w.cfg.Repo, bareDir, "--", "--bare")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("bare clone: %s: %w", string(out), err)
+		code, err := run(fmt.Sprintf("gh repo clone %s %s -- --bare",
+			shellQuote(w.cfg.Repo), shellQuote(bareDir)))
+		if err != nil {
+			return fmt.Errorf("bare clone: %w", err)
+		}
+		if code != 0 {
+			return fmt.Errorf("bare clone: exit code %d", code)
 		}
 	} else {
 		// Fetch latest
-		cmd := exec.CommandContext(ctx, "git", "fetch", "origin")
-		cmd.Dir = bareDir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("git fetch: %s: %w", string(out), err)
+		code, err := run(fmt.Sprintf("git -C %s fetch origin", shellQuote(bareDir)))
+		if err != nil {
+			return fmt.Errorf("git fetch: %w", err)
+		}
+		if code != 0 {
+			return fmt.Errorf("git fetch: exit code %d", code)
 		}
 	}
 
 	// If worktree already exists, just fetch
 	if _, err := os.Stat(workdir); err == nil {
-		cmd := exec.CommandContext(ctx, "git", "fetch", "origin")
-		cmd.Dir = workdir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("worktree fetch: %s: %w", string(out), err)
+		code, err := run(fmt.Sprintf("git -C %s fetch origin", shellQuote(workdir)))
+		if err != nil {
+			return fmt.Errorf("worktree fetch: %w", err)
+		}
+		if code != 0 {
+			return fmt.Errorf("worktree fetch: exit code %d", code)
 		}
 		return nil
 	}
@@ -569,10 +650,13 @@ func (w *Watcher) cloneRepo(ctx context.Context, issueDir, workdir string, issue
 	}
 
 	branch := fmt.Sprintf("agent/issue-%d", issueNum)
-	cmd := exec.CommandContext(ctx, "git", "worktree", "add", "-b", branch, workdir)
-	cmd.Dir = bareDir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("worktree add: %s: %w", string(out), err)
+	code, err := run(fmt.Sprintf("git -C %s worktree add -b %s %s",
+		shellQuote(bareDir), shellQuote(branch), shellQuote(workdir)))
+	if err != nil {
+		return fmt.Errorf("worktree add: %w", err)
+	}
+	if code != 0 {
+		return fmt.Errorf("worktree add: exit code %d", code)
 	}
 
 	return nil

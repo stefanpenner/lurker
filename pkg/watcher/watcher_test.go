@@ -44,7 +44,7 @@ func TestLoadState_Valid(t *testing.T) {
 
 func TestManager_AddRemoveRepo(t *testing.T) {
 	dir := t.TempDir()
-	mgr, err := NewManager(dir, 30*time.Second)
+	mgr, err := NewManager(dir, 30*time.Second, nil)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestManager_AddRemoveRepo(t *testing.T) {
 
 func TestManager_IsProcessed(t *testing.T) {
 	dir := t.TempDir()
-	mgr, err := NewManager(dir, 30*time.Second)
+	mgr, err := NewManager(dir, 30*time.Second, nil)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestManager_IsProcessed(t *testing.T) {
 
 func TestManager_StoreAndKnow(t *testing.T) {
 	dir := t.TempDir()
-	mgr, err := NewManager(dir, 30*time.Second)
+	mgr, err := NewManager(dir, 30*time.Second, nil)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}

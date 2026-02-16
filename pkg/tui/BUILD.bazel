@@ -5,16 +5,20 @@ go_library(
     srcs = [
         "keys.go",
         "model.go",
+        "pty.go",
         "styles.go",
         "view.go",
     ],
     importpath = "github.com/stefanpenner/lurker/pkg/tui",
     visibility = ["//visibility:public"],
     deps = [
+        "//pkg/github",
         "//pkg/watcher",
         "@com_github_charmbracelet_bubbles//spinner",
         "@com_github_charmbracelet_bubbles//textinput",
         "@com_github_charmbracelet_bubbletea//:bubbletea",
         "@com_github_charmbracelet_lipgloss//:lipgloss",
+        "@com_github_creack_pty//:pty",
+        "@org_golang_x_term//:term",
     ],
 )

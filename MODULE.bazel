@@ -16,6 +16,8 @@ use_repo(
     "com_github_charmbracelet_bubbles",
     "com_github_charmbracelet_bubbletea",
     "com_github_charmbracelet_lipgloss",
+    "com_github_creack_pty",
+    "org_golang_x_term",
 )
 
 bazel_dep(name = "hermetic_cc_toolchain", version = "4.1.0")

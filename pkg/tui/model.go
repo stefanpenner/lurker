@@ -2,17 +2,20 @@ package tui
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/stefanpenner/lurker/pkg/github"
 	"github.com/stefanpenner/lurker/pkg/watcher"
 )
 
@@ -81,6 +84,12 @@ type Model struct {
 	focusIssue  *watcher.TrackedIssue
 	focusScroll int
 
+	// GitHub API client
+	ghClient *github.Client
+
+	// Persistent shell sessions (PTY per issue)
+	ptySessions map[string]*ptySession
+
 	// Counters
 	lastPoll  time.Time
 	pollCount int
@@ -99,9 +108,9 @@ type prResultMsg struct {
 }
 
 // NewModel creates a new TUI Model.
-func NewModel(manager *watcher.Manager) Model {
+func NewModel(manager *watcher.Manager, ghClient *github.Client) Model {
 	s := spinner.New()
-	s.Spinner = spinner.Dot
+	s.Spinner = spinner.MiniDot
 
 	ti := textinput.New()
 	ti.Placeholder = "owner/repo"
@@ -116,7 +125,9 @@ func NewModel(manager *watcher.Manager) Model {
 		spinner:      s,
 		textInput:    ti,
 		manager:      manager,
+		ghClient:     ghClient,
 		eventCh:      manager.EventCh(),
+		ptySessions:  make(map[string]*ptySession),
 		now:          time.Now(),
 	}
 }
@@ -175,6 +186,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case prResultMsg:
 		m.handlePRResult(msg)
+
+	case interactiveClaudeDoneMsg:
+		m.handleInteractiveReturn(msg)
 	}
 
 	// Forward messages to textinput when focused, but skip the keypress
@@ -307,6 +321,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			return m.launchLazygitFor(m.focusIssue)
 		case "c":
 			return m.launchClaudeFor(m.focusIssue)
+		case "t":
+			return m.takeoverClaudeFor(m.focusIssue)
+		case "s":
+			return m.launchShellFor(m.focusIssue)
 		}
 		return nil
 	}
@@ -359,6 +377,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.clampFocusScroll()
 			m.focus = focusFocus
 		}
+	case "s":
+		return m.launchShellFor(m.selectedIssue())
 	case "g":
 		return m.launchLazygitFor(m.selectedIssue())
 	case "c":
@@ -381,6 +401,31 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
+func (m *Model) ensurePtySession(key string, workdir string) {
+	if s := m.ptySessions[key]; s != nil && !s.isDone() {
+		return
+	}
+	session, err := newPtySession(workdir)
+	if err != nil {
+		m.appendLog(key, "PTY: "+err.Error())
+		return
+	}
+	m.ptySessions[key] = session
+	m.manager.SetIssuePTY(key, session)
+	m.appendLog(key, fmt.Sprintf("PTY created [%s] in %s", key, workdir))
+}
+
+func (m *Model) ptyWorkdir(iss *watcher.TrackedIssue) string {
+	if iss.Workdir != "" {
+		return iss.Workdir
+	}
+	// Use the issue-specific directory so each PTY starts in its own space.
+	// Create it eagerly — processIssue will create subdirs within it.
+	dir := filepath.Join(m.manager.BaseDir(), iss.Repo, fmt.Sprintf("%d", iss.Number))
+	os.MkdirAll(dir, 0o755)
+	return dir
+}
+
 func (m *Model) toggleIssueProcessing() {
 	iss := m.selectedIssue()
 	if iss == nil {
@@ -390,6 +435,7 @@ func (m *Model) toggleIssueProcessing() {
 
 	switch iss.Status {
 	case watcher.StatusPending:
+		m.ensurePtySession(key, m.ptyWorkdir(iss))
 		m.manager.StartIssue(iss.Repo, iss.Number)
 		iss.Status = watcher.StatusReacted
 		m.appendLog(key, "▶ Started")
@@ -399,11 +445,13 @@ func (m *Model) toggleIssueProcessing() {
 		iss.Status = watcher.StatusPaused
 		m.appendLog(key, "⏸ Paused")
 	case watcher.StatusPaused:
+		m.ensurePtySession(key, m.ptyWorkdir(iss))
 		m.manager.StartIssue(iss.Repo, iss.Number)
 		iss.Status = watcher.StatusReacted
 		m.appendLog(key, "▶ Resumed")
 		m.expanded[key] = true
 	case watcher.StatusFailed:
+		m.ensurePtySession(key, m.ptyWorkdir(iss))
 		m.manager.StartIssue(iss.Repo, iss.Number)
 		iss.Status = watcher.StatusReacted
 		iss.Error = ""
@@ -452,6 +500,7 @@ func (m *Model) toggleFocusIssueProcessing() {
 
 	switch iss.Status {
 	case watcher.StatusPending:
+		m.ensurePtySession(key, m.ptyWorkdir(iss))
 		m.manager.StartIssue(iss.Repo, iss.Number)
 		iss.Status = watcher.StatusReacted
 		m.appendLog(key, "▶ Started")
@@ -460,10 +509,12 @@ func (m *Model) toggleFocusIssueProcessing() {
 		iss.Status = watcher.StatusPaused
 		m.appendLog(key, "⏸ Paused")
 	case watcher.StatusPaused:
+		m.ensurePtySession(key, m.ptyWorkdir(iss))
 		m.manager.StartIssue(iss.Repo, iss.Number)
 		iss.Status = watcher.StatusReacted
 		m.appendLog(key, "▶ Resumed")
 	case watcher.StatusFailed:
+		m.ensurePtySession(key, m.ptyWorkdir(iss))
 		m.manager.StartIssue(iss.Repo, iss.Number)
 		iss.Status = watcher.StatusReacted
 		iss.Error = ""
@@ -521,6 +572,10 @@ func (m *Model) removeSelectedRepo() {
 			key := issueKey(issue.Repo, issue.Number)
 			delete(m.logs, key)
 			delete(m.expanded, key)
+			if s := m.ptySessions[key]; s != nil {
+				s.cmd.Process.Signal(syscall.SIGHUP)
+				delete(m.ptySessions, key)
+			}
 		}
 	}
 	m.issues = remaining
@@ -545,6 +600,31 @@ func (m *Model) launchLazygitFor(iss *watcher.TrackedIssue) tea.Cmd {
 	return tea.ExecProcess(c, func(err error) tea.Msg { return nil })
 }
 
+func (m *Model) launchShellFor(iss *watcher.TrackedIssue) tea.Cmd {
+	if iss == nil || iss.Workdir == "" {
+		return nil
+	}
+
+	key := issueKey(iss.Repo, iss.Number)
+
+	session := m.ptySessions[key]
+	if session == nil || session.isDone() {
+		// No PTY exists yet — create one (starts shell automatically)
+		var err error
+		session, err = newPtySession(iss.Workdir)
+		if err != nil {
+			m.appendLog(key, "PTY: "+err.Error())
+			return nil
+		}
+		m.ptySessions[key] = session
+		m.manager.SetIssuePTY(key, session)
+	}
+
+	return tea.Exec(&ptyAttacher{session: session, label: key}, func(err error) tea.Msg {
+		return nil
+	})
+}
+
 func (m *Model) launchClaudeFor(iss *watcher.TrackedIssue) tea.Cmd {
 	if iss == nil || iss.Workdir == "" {
 		return nil
@@ -563,6 +643,47 @@ func (m *Model) launchClaudeFor(iss *watcher.TrackedIssue) tea.Cmd {
 	return tea.ExecProcess(c, func(err error) tea.Msg { return nil })
 }
 
+// interactiveClaudeDoneMsg is sent when the user exits an interactive Claude session.
+type interactiveClaudeDoneMsg struct {
+	repo    string
+	num     int
+	workdir string
+}
+
+func (m *Model) takeoverClaudeFor(iss *watcher.TrackedIssue) tea.Cmd {
+	if iss == nil || iss.Workdir == "" {
+		return nil
+	}
+
+	// Stop automated processing if running
+	if isActive(iss.Status) {
+		m.manager.StopIssue(iss.Repo, iss.Number)
+		key := issueKey(iss.Repo, iss.Number)
+		m.appendLog(key, "⏸ Pausing automation — launching interactive session...")
+	}
+
+	repo := iss.Repo
+	num := iss.Number
+	workdir := iss.Workdir
+
+	// Launch interactive Claude with --continue to pick up where automation left off
+	c := exec.Command("claude", "--continue")
+	c.Dir = workdir
+	env := os.Environ()
+	filtered := make([]string, 0, len(env))
+	for _, e := range env {
+		if !strings.HasPrefix(e, "ANTHROPIC_API_KEY=") &&
+			!strings.HasPrefix(e, "CLAUDECODE=") {
+			filtered = append(filtered, e)
+		}
+	}
+	c.Env = filtered
+
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		return interactiveClaudeDoneMsg{repo: repo, num: num, workdir: workdir}
+	})
+}
+
 func (m *Model) approvePRFor(iss *watcher.TrackedIssue) tea.Cmd {
 	if iss == nil || iss.Workdir == "" {
 		return nil
@@ -572,6 +693,7 @@ func (m *Model) approvePRFor(iss *watcher.TrackedIssue) tea.Cmd {
 	title := iss.Title
 	workdir := iss.Workdir
 	repo := iss.Repo
+	ghClient := m.ghClient
 
 	key := issueKey(repo, num)
 	m.appendLog(key, "")
@@ -599,20 +721,38 @@ func (m *Model) approvePRFor(iss *watcher.TrackedIssue) tea.Cmd {
 		body := fmt.Sprintf("Fixes #%d\n\n## Commits\n```\n%s```\n\n🤖 Generated by lurker", num, string(logOut))
 
 		prTitle := fmt.Sprintf("Fix #%d: %s", num, title)
-		cmd = exec.Command("gh", "pr", "create",
-			"--repo", repo,
-			"--title", prTitle,
-			"--body", body,
-			"--head", branch,
-		)
-		cmd.Dir = workdir
-		out, err := cmd.CombinedOutput()
+		pr, err := ghClient.CreatePR(context.Background(), github.CreatePRRequest{
+			Repo:  repo,
+			Title: prTitle,
+			Body:  body,
+			Head:  branch,
+			Base:  "main",
+		})
 		if err != nil {
-			return prResultMsg{repo: repo, issueNum: num, err: fmt.Errorf("pr: %s: %w", strings.TrimSpace(string(out)), err)}
+			return prResultMsg{repo: repo, issueNum: num, err: fmt.Errorf("pr: %w", err)}
 		}
 
-		return prResultMsg{repo: repo, issueNum: num, url: strings.TrimSpace(string(out))}
+		return prResultMsg{repo: repo, issueNum: num, url: pr.HTMLURL}
 	}
+}
+
+func (m *Model) handleInteractiveReturn(msg interactiveClaudeDoneMsg) {
+	key := issueKey(msg.repo, msg.num)
+
+	// Check if the branch has commits beyond origin/main
+	branch := fmt.Sprintf("agent/issue-%d", msg.num)
+	cmd := exec.Command("git", "log", "--oneline", "origin/main.."+branch)
+	cmd.Dir = msg.workdir
+	out, err := cmd.Output()
+	if err == nil && len(strings.TrimSpace(string(out))) > 0 {
+		m.updateIssueStatus(msg.repo, msg.num, watcher.StatusReady)
+		m.appendLog(key, "✅ Interactive session done — ready for review")
+	} else {
+		// No new commits — mark as clone-ready so user can restart
+		m.updateIssueStatus(msg.repo, msg.num, watcher.StatusCloneReady)
+		m.appendLog(key, "Interactive session ended")
+	}
+	m.refreshFocusIssue()
 }
 
 func (m *Model) handlePRResult(msg prResultMsg) {
@@ -749,10 +889,34 @@ func (m *Model) appendLog(key string, line string) {
 	if m.logs[key] == nil {
 		m.logs[key] = []string{}
 	}
+
+	// Check if focus view should auto-scroll (tail-follow)
+	autoScroll := false
+	if m.focus == focusFocus && m.focusIssue != nil {
+		fKey := issueKey(m.focusIssue.Repo, m.focusIssue.Number)
+		if fKey == key {
+			visibleLines := m.height - 5
+			if visibleLines < 1 {
+				visibleLines = 1
+			}
+			maxScroll := len(m.logs[key]) - visibleLines
+			if maxScroll < 0 {
+				maxScroll = 0
+			}
+			autoScroll = m.focusScroll >= maxScroll
+		}
+	}
+
 	m.logs[key] = append(m.logs[key], line)
 	if len(m.logs[key]) > maxLogLines {
 		m.logs[key] = m.logs[key][len(m.logs[key])-maxLogLines:]
 	}
+
+	if autoScroll {
+		m.focusScroll = 999999
+		m.clampFocusScroll()
+	}
+
 	repo, num := parseIssueKey(key)
 	if repo != "" {
 		m.persistLogLine(repo, num, line)

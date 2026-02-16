@@ -1,0 +1,24 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "github",
+    srcs = [
+        "client.go",
+        "issues.go",
+        "pulls.go",
+        "ratelimit.go",
+    ],
+    importpath = "github.com/stefanpenner/lurker/pkg/github",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "github_test",
+    srcs = [
+        "client_test.go",
+        "issues_test.go",
+        "pulls_test.go",
+        "ratelimit_test.go",
+    ],
+    embed = [":github"],
+)

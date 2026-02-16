@@ -21,7 +21,8 @@ func helpLineFocus() string {
 	return fmtHelp("j/k", "scroll") + sep +
 		fmtHelp("G", "bottom") + sep +
 		fmtHelp("space", "start/pause") + sep +
-		fmtHelp("o", "open") + sep +
+		fmtHelp("t", "takeover") + sep +
+		fmtHelp("s", "shell") + sep +
 		fmtHelp("a", "approve") + sep +
 		fmtHelp("c", "claude") + sep +
 		fmtHelp("esc", "back")

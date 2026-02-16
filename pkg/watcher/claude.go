@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -214,8 +215,10 @@ func formatToolUse(block contentBlock) string {
 // RunClaude invokes Claude Code in the given workdir with the given prompt.
 // It streams output line-by-line via logFn. The tools parameter specifies
 // the allowed tools string; pass claudeTools for the default set.
+// If ptySlave is non-nil, formatted output is also written there so the
+// user can see Claude's activity when attached to the issue's PTY.
 // Returns the full output on completion.
-func RunClaude(ctx context.Context, workdir string, prompt string, tools string, logFn LogFunc) (string, error) {
+func RunClaude(ctx context.Context, workdir string, prompt string, tools string, logFn LogFunc, ptySlave *os.File) (string, error) {
 	cmd := exec.CommandContext(ctx, "claude",
 		"-p",
 		"--output-format", "stream-json",
@@ -236,6 +239,11 @@ func RunClaude(ctx context.Context, workdir string, prompt string, tools string,
 	}
 	cmd.Env = filtered
 
+	// Route stderr to PTY if available, otherwise capture
+	if ptySlave != nil {
+		cmd.Stderr = ptySlave
+	}
+
 	// Pass prompt via stdin
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
@@ -247,9 +255,12 @@ func RunClaude(ctx context.Context, workdir string, prompt string, tools string,
 		return "", fmt.Errorf("stdout pipe: %w", err)
 	}
 
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return "", fmt.Errorf("stderr pipe: %w", err)
+	var stderr io.ReadCloser
+	if ptySlave == nil {
+		stderr, err = cmd.StderrPipe()
+		if err != nil {
+			return "", fmt.Errorf("stderr pipe: %w", err)
+		}
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -264,10 +275,13 @@ func RunClaude(ctx context.Context, workdir string, prompt string, tools string,
 
 	var output strings.Builder
 
-	// Read stderr in a goroutine
+	// Read stderr in a goroutine (only when not routed to PTY)
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
+		if stderr == nil {
+			return
+		}
 		scanner := bufio.NewScanner(stderr)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for scanner.Scan() {
@@ -286,10 +300,14 @@ func RunClaude(ctx context.Context, workdir string, prompt string, tools string,
 		output.WriteString(raw)
 		output.WriteString("\n")
 
-		if logFn != nil {
-			lines := formatStreamEvent(raw)
-			for _, line := range lines {
+		lines := formatStreamEvent(raw)
+		for _, line := range lines {
+			if logFn != nil {
 				logFn(line)
+			}
+			// Mirror formatted output to PTY
+			if ptySlave != nil {
+				ptySlave.Write([]byte("  " + line + "\r\n"))
 			}
 		}
 	}

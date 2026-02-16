@@ -639,6 +639,8 @@ func (m Model) renderHelpScreen() string {
 	section("Actions", [][2]string{
 		{"space", "Start / pause processing"},
 		{"a", "Approve & create PR"},
+		{"t", "Takeover — interactive Claude (--continue)"},
+		{"s", "Shell — persistent PTY (Ctrl+] to detach)"},
 		{"g", "Launch lazygit"},
 		{"c", "Launch Claude Code"},
 	})

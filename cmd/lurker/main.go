@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/stefanpenner/lurker/pkg/github"
 	"github.com/stefanpenner/lurker/pkg/tui"
 	"github.com/stefanpenner/lurker/pkg/watcher"
 )
@@ -27,7 +28,13 @@ func main() {
 		*baseDir = filepath.Join(home, ".local", "share", "lurker")
 	}
 
-	mgr, err := watcher.NewManager(*baseDir, *interval)
+	ghClient, err := github.NewClient()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	mgr, err := watcher.NewManager(*baseDir, *interval, ghClient)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating manager: %v\n", err)
 		os.Exit(1)
@@ -36,7 +43,7 @@ func main() {
 	mgr.Start()
 	defer mgr.Stop()
 
-	model := tui.NewModel(mgr)
+	model := tui.NewModel(mgr, ghClient)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {

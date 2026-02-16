@@ -37,6 +37,8 @@ lurker
 - **Auto-dispatch** — Start Claude Code on an issue with a single keypress
 - **Live progress** — Stream Claude's tool use and thinking in real time
 - **Review workflow** — Inspect changes, launch lazygit, open Claude interactively
+- **Takeover mode** — Jump into a running Claude session with `t` to guide it interactively
+- **Shell access** — Drop into a shell in any issue's workdir with `s`
 - **One-click PRs** — Push the branch and open a PR from the TUI
 - **Persistent state** — Remembers repos and processed issues across sessions
 - **Focus mode** — Full-screen view for deep-diving into a single issue
@@ -60,11 +62,14 @@ lurker
 | `f` | Focus view (full-screen) |
 | `r` | Add repo |
 | `R`/`d` | Remove repo |
+| `t` | Takeover — interactive Claude (`--continue`) |
+| `s` | Shell — open `$SHELL` in workdir |
 | `g` | Launch lazygit |
 | `c` | Launch Claude Code |
 | `o` | Open in browser |
 | `i` | Info dialog |
 | `a` | Approve & create PR |
+| `?` | Help |
 | `q` | Quit |
 
 ## Setup

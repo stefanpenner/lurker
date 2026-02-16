@@ -6,6 +6,7 @@ go_library(
     importpath = "github.com/stefanpenner/lurker/cmd/lurker",
     visibility = ["//visibility:private"],
     deps = [
+        "//pkg/github",
         "//pkg/tui",
         "//pkg/watcher",
         "@com_github_charmbracelet_bubbletea//:bubbletea",
