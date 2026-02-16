@@ -33,6 +33,10 @@ type Event struct {
 	IssueNum  int
 	Text      string
 	Timestamp time.Time
+	// Extra fields for EventIssueFound
+	IssueURL    string
+	IssueBody   string
+	IssueLabels string
 }
 
 // IssueStatus tracks the lifecycle of an issue being processed.
@@ -70,6 +74,9 @@ func (s IssueStatus) String() string {
 type TrackedIssue struct {
 	Number    int
 	Title     string
+	Body      string
+	Labels    string
+	URL       string
 	Status    IssueStatus
 	Workdir   string
 	Error     string
@@ -200,7 +207,15 @@ func (w *Watcher) processIssue(ctx context.Context, eventCh chan<- Event, issue 
 	w.processed[num] = true
 	_ = w.saveState()
 
-	w.emit(eventCh, EventIssueFound, num, issue.Title)
+	eventCh <- Event{
+		Kind:        EventIssueFound,
+		IssueNum:    num,
+		Text:        issue.Title,
+		Timestamp:   time.Now(),
+		IssueURL:    issue.URL,
+		IssueBody:   issue.Body,
+		IssueLabels: issue.LabelNames(),
+	}
 
 	// React with eyes
 	if err := AddReaction(w.cfg.Repo, num); err != nil {

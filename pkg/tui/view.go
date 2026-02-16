@@ -9,7 +9,6 @@ import (
 	"github.com/stefanpenner/issue-watcher/pkg/watcher"
 )
 
-// View implements tea.Model.
 func (m Model) View() string {
 	if m.width == 0 {
 		return "Initializing..."
@@ -17,34 +16,26 @@ func (m Model) View() string {
 
 	var b strings.Builder
 
-	// Header
+	// Header + status bar
 	b.WriteString(m.renderHeader())
 	b.WriteString("\n")
-
-	// Status bar
 	b.WriteString(m.renderStatusBar())
 	b.WriteString("\n")
-
-	// Separator
 	b.WriteString(strings.Repeat("─", m.width))
 	b.WriteString("\n")
 
-	// Issue table
-	b.WriteString(m.renderTable())
-
-	// Separator
-	b.WriteString(strings.Repeat("─", m.width))
-	b.WriteString("\n")
-
-	// Log viewport
-	b.WriteString(m.renderLogPanel())
-
-	// Separator
-	b.WriteString(strings.Repeat("─", m.width))
-	b.WriteString("\n")
+	// Issue list with inline logs
+	b.WriteString(m.renderIssueList())
 
 	// Footer
+	b.WriteString(strings.Repeat("─", m.width))
+	b.WriteString("\n")
 	b.WriteString(m.renderFooter())
+
+	// Dialog overlay
+	if m.focus == focusDialog && m.dialogIssue != nil {
+		return m.renderWithDialog(b.String())
+	}
 
 	return b.String()
 }
@@ -52,102 +43,155 @@ func (m Model) View() string {
 func (m Model) renderHeader() string {
 	title := headerStyle.Render("issue-watcher")
 	repo := lipgloss.NewStyle().Foreground(colorTeal).Render(m.repo)
-	interval := lipgloss.NewStyle().Foreground(colorSubtext).Render("polling 30s")
 
-	left := fmt.Sprintf("  %s  %s", title, repo)
-	right := fmt.Sprintf("%s  ", interval)
+	left := fmt.Sprintf(" %s  %s", title, repo)
+
+	var right string
+	if m.paused {
+		right = statusPausedStyle.Render("⏸ paused") + "  "
+	} else {
+		right = lipgloss.NewStyle().Foreground(colorSubtext).Render("polling 30s") + "  "
+	}
 
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 0 {
 		gap = 1
 	}
-
 	return left + strings.Repeat(" ", gap) + right
 }
 
 func (m Model) renderStatusBar() string {
-	var status string
-	if m.watching {
-		status = statusRunningStyle.Render("● watching")
+	parts := []string{}
+
+	active := fmt.Sprintf("%d active", m.activeCount)
+	ready := fmt.Sprintf("%d ready", m.readyCount)
+	failed := fmt.Sprintf("%d failed", m.failCount)
+
+	if m.activeCount > 0 {
+		parts = append(parts, statusRunningStyle.Render(m.spinner.View()+" "+active))
 	} else {
-		status = statusFailedStyle.Render("● stopped")
+		parts = append(parts, lipgloss.NewStyle().Foreground(colorSubtext).Render(active))
+	}
+	if m.readyCount > 0 {
+		parts = append(parts, statusReadyStyle.Render(ready))
+	} else {
+		parts = append(parts, lipgloss.NewStyle().Foreground(colorSubtext).Render(ready))
+	}
+	if m.failCount > 0 {
+		parts = append(parts, statusFailedStyle.Render(failed))
+	} else {
+		parts = append(parts, lipgloss.NewStyle().Foreground(colorSubtext).Render(failed))
 	}
 
-	processed := fmt.Sprintf("%d processed", len(m.issues))
-
-	active := lipgloss.NewStyle().Foreground(colorYellow).Render(
-		fmt.Sprintf("%d active", m.activeCount))
-
-	ready := lipgloss.NewStyle().Foreground(colorGreen).Render(
-		fmt.Sprintf("%d ready", m.readyCount))
-
-	failed := lipgloss.NewStyle().Foreground(colorRed).Render(
-		fmt.Sprintf("%d failed", m.failCount))
-
-	return statusBarStyle.Render(fmt.Sprintf("  %s   %s   %s   %s   %s",
-		status, processed, active, ready, failed))
+	return statusBarStyle.Render(" " + strings.Join(parts, "   "))
 }
 
-func (m Model) renderTable() string {
-	var b strings.Builder
+// renderIssueList renders the scrollable list of issues with inline expandable logs.
+func (m Model) renderIssueList() string {
+	// Build all lines first
+	var allLines []string
 
-	header := tableHeaderStyle.Render(
-		fmt.Sprintf("  %-5s %-10s %-8s %-28s %s", "#", "Status", "Time", "Issue", "Workdir"))
-	b.WriteString(header)
-	b.WriteString("\n")
+	for i, iss := range m.issues {
+		isSelected := i == m.cursor
+		allLines = append(allLines, m.renderIssueLine(iss, isSelected))
 
-	if len(m.issues) == 0 {
-		b.WriteString(normalRowStyle.Render("  Waiting for issues..."))
-		b.WriteString("\n")
+		if m.expanded[iss.Number] {
+			logLines := m.logs[iss.Number]
+			visibleLogs := logLines
+
+			// Apply scroll offset if this issue has log focus
+			if m.focus == focusLogs && isSelected {
+				start := m.logScroll
+				end := start + maxVisibleLogs
+				if start > len(logLines) {
+					start = len(logLines)
+				}
+				if end > len(logLines) {
+					end = len(logLines)
+				}
+				visibleLogs = logLines[start:end]
+
+				// Show scroll indicator
+				if start > 0 {
+					allLines = append(allLines, logLineStyle.Render("     ↑ more"))
+				}
+			} else {
+				// When not focused, show last N lines
+				if len(visibleLogs) > maxVisibleLogs {
+					visibleLogs = visibleLogs[len(visibleLogs)-maxVisibleLogs:]
+				}
+			}
+
+			isActive := iss.Status == watcher.StatusClaudeRunning
+			for _, line := range visibleLogs {
+				if isActive {
+					allLines = append(allLines, logLineActiveStyle.Render("     "+line))
+				} else {
+					allLines = append(allLines, logLineStyle.Render("     "+line))
+				}
+			}
+
+			if m.focus == focusLogs && isSelected {
+				end := m.logScroll + maxVisibleLogs
+				if end < len(logLines) {
+					allLines = append(allLines, logLineStyle.Render("     ↓ more"))
+				}
+			}
+		}
 	}
 
-	// Show up to 8 visible issues around the cursor
-	start := 0
-	end := len(m.issues)
-	maxVisible := 8
-	if end-start > maxVisible {
-		start = m.cursor - maxVisible/2
-		if start < 0 {
-			start = 0
-		}
-		end = start + maxVisible
-		if end > len(m.issues) {
-			end = len(m.issues)
-			start = end - maxVisible
-		}
+	if len(allLines) == 0 {
+		allLines = append(allLines, lipgloss.NewStyle().Foreground(colorSubtext).Render("  Waiting for issues..."))
 	}
 
-	for i := start; i < end; i++ {
-		iss := m.issues[i]
-		statusIcon := m.statusIcon(iss.Status)
-		statusLabel := m.statusLabel(iss.Status)
-
-		// Elapsed time
-		elapsedStr := elapsed(iss.StartedAt, m.now)
-		if iss.Status == watcher.StatusClaudeRunning {
-			// Show spinner for active issues
-			elapsedStr = m.spinner.View() + " " + elapsedStr
-		}
-
-		title := iss.Title
-		if len(title) > 26 {
-			title = title[:26] + "…"
-		}
-
-		workdir := iss.Workdir
-
-		row := fmt.Sprintf("  %-5d %s %-8s %-8s %-28s %s",
-			iss.Number, statusIcon, statusLabel, elapsedStr, title, workdir)
-
-		if i == m.cursor {
-			b.WriteString(selectedRowStyle.Render(row))
-		} else {
-			b.WriteString(normalRowStyle.Render(row))
-		}
-		b.WriteString("\n")
+	// Apply list scrolling
+	start := m.listScroll
+	end := start + m.listHeight
+	if start > len(allLines) {
+		start = len(allLines)
+	}
+	if end > len(allLines) {
+		end = len(allLines)
 	}
 
-	return b.String()
+	visible := allLines[start:end]
+
+	// Pad to fill the list area
+	for len(visible) < m.listHeight {
+		visible = append(visible, "")
+	}
+
+	return strings.Join(visible, "\n") + "\n"
+}
+
+func (m Model) renderIssueLine(iss watcher.TrackedIssue, selected bool) string {
+	icon := m.statusIcon(iss.Status)
+	label := m.statusLabel(iss.Status)
+	elapsedStr := elapsed(iss.StartedAt, m.now)
+
+	expandIcon := "▸"
+	if m.expanded[iss.Number] {
+		expandIcon = "▾"
+	}
+	logCount := len(m.logs[iss.Number])
+
+	// Spinner for active
+	if iss.Status == watcher.StatusClaudeRunning {
+		elapsedStr = m.spinner.View() + " " + elapsedStr
+	}
+
+	title := iss.Title
+	if len(title) > 40 {
+		title = title[:40] + "…"
+	}
+
+	line := fmt.Sprintf(" %s #%-4d %s %-7s %-7s %s  (%d)",
+		expandIcon, iss.Number, icon, label, elapsedStr, title, logCount)
+
+	if selected {
+		return selectedRowStyle.Render(line)
+	}
+	return normalRowStyle.Render(line)
 }
 
 func (m Model) statusIcon(status watcher.IssueStatus) string {
@@ -188,32 +232,92 @@ func (m Model) statusLabel(status watcher.IssueStatus) string {
 	}
 }
 
-func (m Model) renderLogPanel() string {
-	var b strings.Builder
-
-	header := "Logs"
-	if m.cursor >= 0 && m.cursor < len(m.issues) {
-		iss := m.issues[m.cursor]
-		logCount := len(m.logs[iss.Number])
-		header = fmt.Sprintf("Logs (issue #%d) — %d lines", iss.Number, logCount)
-		if iss.Status == watcher.StatusClaudeRunning {
-			header += " " + m.spinner.View()
-		}
+func (m Model) renderFooter() string {
+	switch m.focus {
+	case focusLogs:
+		return footerStyle.Render(helpLineLogs())
+	case focusDialog:
+		return footerStyle.Render(helpLineDialog())
+	default:
+		return footerStyle.Render(helpLineNormal())
 	}
-	if m.focus == focusLogs {
-		header += "  (scrolling — esc to go back)"
-	}
-	b.WriteString(logHeaderStyle.Render(header))
-	b.WriteString("\n")
-	b.WriteString(m.logViewport.View())
-	b.WriteString("\n")
-
-	return b.String()
 }
 
-func (m Model) renderFooter() string {
-	if m.focus == focusLogs {
-		return footerStyle.Render(helpLineLogs())
+// renderWithDialog overlays a dialog box on top of the main view.
+func (m Model) renderWithDialog(base string) string {
+	iss := m.dialogIssue
+	if iss == nil {
+		return base
 	}
-	return footerStyle.Render(helpLineList())
+
+	var d strings.Builder
+	d.WriteString(dialogTitleStyle.Render(fmt.Sprintf("Issue #%d", iss.Number)))
+	d.WriteString("\n\n")
+	d.WriteString(dialogLabelStyle.Render("Title: "))
+	d.WriteString(iss.Title)
+	d.WriteString("\n")
+	d.WriteString(dialogLabelStyle.Render("Status: "))
+	d.WriteString(iss.Status.String())
+	d.WriteString("\n")
+	if iss.Labels != "" {
+		d.WriteString(dialogLabelStyle.Render("Labels: "))
+		d.WriteString(iss.Labels)
+		d.WriteString("\n")
+	}
+	if iss.URL != "" {
+		d.WriteString(dialogLabelStyle.Render("URL: "))
+		d.WriteString(iss.URL)
+		d.WriteString("\n")
+	}
+	if iss.Workdir != "" {
+		d.WriteString(dialogLabelStyle.Render("Workdir: "))
+		d.WriteString(iss.Workdir)
+		d.WriteString("\n")
+	}
+	if iss.Error != "" {
+		d.WriteString("\n")
+		d.WriteString(statusFailedStyle.Render("Error: "+iss.Error))
+		d.WriteString("\n")
+	}
+	if iss.Body != "" {
+		d.WriteString("\n")
+		d.WriteString(dialogLabelStyle.Render("Body:"))
+		d.WriteString("\n")
+		body := iss.Body
+		if len(body) > 500 {
+			body = body[:500] + "…"
+		}
+		d.WriteString(body)
+		d.WriteString("\n")
+	}
+
+	dialog := dialogStyle.Render(d.String())
+
+	// Center the dialog over the base view
+	dialogLines := strings.Split(dialog, "\n")
+	baseLines := strings.Split(base, "\n")
+
+	startY := (len(baseLines) - len(dialogLines)) / 2
+	if startY < 0 {
+		startY = 0
+	}
+	startX := (m.width - lipgloss.Width(dialogLines[0])) / 2
+	if startX < 0 {
+		startX = 0
+	}
+
+	for i, dLine := range dialogLines {
+		row := startY + i
+		if row < len(baseLines) {
+			padded := baseLines[row]
+			// Overlay dialog line at startX
+			if startX < len(padded) {
+				baseLines[row] = padded[:startX] + dLine
+			} else {
+				baseLines[row] = strings.Repeat(" ", startX) + dLine
+			}
+		}
+	}
+
+	return strings.Join(baseLines, "\n")
 }

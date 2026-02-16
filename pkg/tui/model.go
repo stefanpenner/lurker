@@ -8,60 +8,64 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/stefanpenner/issue-watcher/pkg/watcher"
 )
 
-const maxLogLines = 500
+const (
+	maxLogLines    = 500
+	maxVisibleLogs = 15 // max log lines shown when expanded
+)
 
 // focus tracks which panel has keyboard focus.
 type focus int
 
 const (
-	focusList focus = iota
-	focusLogs
+	focusList   focus = iota
+	focusLogs         // scrolling within an expanded issue's logs
+	focusDialog       // detail dialog open
 )
 
 // Model is the Bubbletea model for the TUI dashboard.
 type Model struct {
-	issues      []watcher.TrackedIssue
-	logs        map[int][]string // per-issue log lines
-	cursor      int
-	focus       focus
-	logViewport viewport.Model
-	spinner     spinner.Model
-	width       int
-	height      int
-	watching    bool
-	repo        string
-	eventCh     <-chan watcher.Event
+	issues   []watcher.TrackedIssue
+	logs     map[int][]string // per-issue log lines
+	expanded map[int]bool     // which issues have logs toggled open
+
+	cursor    int   // selected issue index
+	focus     focus // current focus mode
+	logScroll int   // scroll offset within focused issue's logs
+
+	listScroll int // scroll offset for the entire issue list
+	listHeight int // how many lines available for the issue list
+
+	spinner spinner.Model
+	width   int
+	height  int
+	paused  bool
+	repo    string
+	eventCh <-chan watcher.Event
+
+	// Dialog state
+	dialogIssue *watcher.TrackedIssue
+
+	// Counters
 	lastPoll    time.Time
 	pollCount   int
 	activeCount int
 	failCount   int
 	readyCount  int
-	now         time.Time // updated every tick for elapsed time display
+	now         time.Time
 }
 
-// eventMsg wraps a watcher.Event for Bubbletea.
+// Messages
 type eventMsg watcher.Event
-
-// tickMsg triggers periodic event channel reads and time updates.
 type tickMsg struct{}
 
-// prResultMsg reports the result of an async PR creation.
 type prResultMsg struct {
 	issueNum int
 	url      string
-	err      error
-}
-
-// commitResultMsg reports the result of an async commit message generation.
-type commitResultMsg struct {
-	issueNum int
-	message  string
 	err      error
 }
 
@@ -70,29 +74,20 @@ func NewModel(repo string, eventCh <-chan watcher.Event) Model {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 
-	vp := viewport.New(80, 10)
-
 	return Model{
-		issues:      nil,
-		logs:        make(map[int][]string),
-		logViewport: vp,
-		spinner:     s,
-		watching:    true,
-		repo:        repo,
-		eventCh:     eventCh,
-		now:         time.Now(),
+		logs:     make(map[int][]string),
+		expanded: make(map[int]bool),
+		spinner:  s,
+		repo:     repo,
+		eventCh:  eventCh,
+		now:      time.Now(),
 	}
 }
 
-// Init implements tea.Model.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(
-		m.spinner.Tick,
-		m.pollEvents(),
-	)
+	return tea.Batch(m.spinner.Tick, m.pollEvents())
 }
 
-// pollEvents reads from the event channel.
 func (m Model) pollEvents() tea.Cmd {
 	return func() tea.Msg {
 		select {
@@ -107,7 +102,6 @@ func (m Model) pollEvents() tea.Cmd {
 	}
 }
 
-// Update implements tea.Model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
@@ -121,12 +115,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.logViewport.Width = msg.Width - 4
-		logHeight := msg.Height - 14
-		if logHeight < 3 {
-			logHeight = 3
+		m.listHeight = msg.Height - 5 // header(1) + status(1) + sep(1) + footer(1) + sep(1)
+		if m.listHeight < 3 {
+			m.listHeight = 3
 		}
-		m.logViewport.Height = logHeight
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -144,9 +136,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case prResultMsg:
 		m.handlePRResult(msg)
-
-	case commitResultMsg:
-		m.handleCommitResult(msg)
 	}
 
 	return m, tea.Batch(cmds...)
@@ -155,53 +144,78 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	key := msg.String()
 
-	// Global keys (work in both focus modes)
-	switch key {
-	case "q", "ctrl+c":
-		return tea.Quit
-	case "o":
-		m.openWorkdir()
+	// Dialog mode — only esc closes
+	if m.focus == focusDialog {
+		if key == "esc" {
+			m.focus = focusList
+			m.dialogIssue = nil
+		}
 		return nil
-	case "d":
-		m.showDiff()
-		return nil
-	case "l":
-		return m.launchLazygit()
-	case "p":
-		return m.createPR()
-	case "c":
-		return m.generateCommit()
 	}
 
+	// Quit always works
+	if key == "q" || key == "ctrl+c" {
+		return tea.Quit
+	}
+
+	// Log scroll mode
 	if m.focus == focusLogs {
 		switch key {
-		case "esc":
+		case "esc", "l":
 			m.focus = focusList
 		case "j", "down":
-			m.logViewport.LineDown(1)
+			m.logScroll++
+			m.clampLogScroll()
 		case "k", "up":
-			m.logViewport.LineUp(1)
+			if m.logScroll > 0 {
+				m.logScroll--
+			}
 		case "g":
-			m.logViewport.GotoTop()
+			m.logScroll = 0
 		case "G":
-			m.logViewport.GotoBottom()
+			m.logScroll = 999999
+			m.clampLogScroll()
+		case "o":
+			m.openGithubIssue()
+		case "a":
+			return m.approvePR()
 		}
-	} else {
-		switch key {
-		case "enter":
+		return nil
+	}
+
+	// Normal list mode
+	switch key {
+	case "j", "down":
+		if m.cursor < len(m.issues)-1 {
+			m.cursor++
+			m.ensureCursorVisible()
+		}
+	case "k", "up":
+		if m.cursor > 0 {
+			m.cursor--
+			m.ensureCursorVisible()
+		}
+	case "l":
+		m.toggleLogs()
+	case "tab":
+		// If expanded, enter log scroll mode
+		if iss := m.selectedIssue(); iss != nil && m.expanded[iss.Number] {
 			m.focus = focusLogs
-			m.logViewport.GotoBottom()
-		case "j", "down":
-			if m.cursor < len(m.issues)-1 {
-				m.cursor++
-				m.updateLogViewport()
-			}
-		case "k", "up":
-			if m.cursor > 0 {
-				m.cursor--
-				m.updateLogViewport()
-			}
+			m.logScroll = 999999
+			m.clampLogScroll()
 		}
+	case "g":
+		return m.launchLazygit()
+	case "c":
+		return m.launchClaude()
+	case "o":
+		m.openGithubIssue()
+	case "i":
+		m.showDialog()
+	case "p":
+		m.paused = !m.paused
+	case "a":
+		return m.approvePR()
 	}
 
 	return nil
@@ -214,22 +228,103 @@ func (m *Model) selectedIssue() *watcher.TrackedIssue {
 	return nil
 }
 
-// launchLazygit suspends the TUI and opens lazygit in the issue's workdir.
+func (m *Model) toggleLogs() {
+	if iss := m.selectedIssue(); iss != nil {
+		m.expanded[iss.Number] = !m.expanded[iss.Number]
+		if !m.expanded[iss.Number] {
+			// Collapsing — exit log focus if we were in it
+			if m.focus == focusLogs {
+				m.focus = focusList
+			}
+		}
+	}
+}
+
+func (m *Model) clampLogScroll() {
+	iss := m.selectedIssue()
+	if iss == nil {
+		return
+	}
+	lines := m.logs[iss.Number]
+	maxScroll := len(lines) - maxVisibleLogs
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if m.logScroll > maxScroll {
+		m.logScroll = maxScroll
+	}
+}
+
+// ensureCursorVisible adjusts listScroll so the cursor's issue line is visible.
+func (m *Model) ensureCursorVisible() {
+	// Calculate the line offset of the cursor in the rendered list
+	lineOffset := 0
+	for i := 0; i < m.cursor; i++ {
+		lineOffset++ // issue line
+		if m.expanded[m.issues[i].Number] {
+			n := len(m.logs[m.issues[i].Number])
+			if n > maxVisibleLogs {
+				n = maxVisibleLogs
+			}
+			lineOffset += n
+		}
+	}
+
+	// Scroll up if cursor is above visible area
+	if lineOffset < m.listScroll {
+		m.listScroll = lineOffset
+	}
+
+	// Scroll down if cursor is below visible area
+	if lineOffset >= m.listScroll+m.listHeight {
+		m.listScroll = lineOffset - m.listHeight + 1
+	}
+}
+
+func (m *Model) openGithubIssue() {
+	if iss := m.selectedIssue(); iss != nil && iss.URL != "" {
+		exec.Command("open", iss.URL).Start()
+	}
+}
+
+func (m *Model) showDialog() {
+	if iss := m.selectedIssue(); iss != nil {
+		m.dialogIssue = iss
+		m.focus = focusDialog
+	}
+}
+
 func (m *Model) launchLazygit() tea.Cmd {
 	iss := m.selectedIssue()
 	if iss == nil || iss.Workdir == "" {
 		return nil
 	}
-
 	c := exec.Command("lazygit")
 	c.Dir = iss.Workdir
-	return tea.ExecProcess(c, func(err error) tea.Msg {
-		return nil // just resume the TUI
-	})
+	return tea.ExecProcess(c, func(err error) tea.Msg { return nil })
 }
 
-// createPR pushes the branch and opens a PR via gh CLI.
-func (m *Model) createPR() tea.Cmd {
+func (m *Model) launchClaude() tea.Cmd {
+	iss := m.selectedIssue()
+	if iss == nil || iss.Workdir == "" {
+		return nil
+	}
+	c := exec.Command("claude")
+	c.Dir = iss.Workdir
+	// Strip env vars that would cause nesting issues
+	env := os.Environ()
+	filtered := make([]string, 0, len(env))
+	for _, e := range env {
+		if !strings.HasPrefix(e, "ANTHROPIC_API_KEY=") &&
+			!strings.HasPrefix(e, "CLAUDECODE=") {
+			filtered = append(filtered, e)
+		}
+	}
+	c.Env = filtered
+	return tea.ExecProcess(c, func(err error) tea.Msg { return nil })
+}
+
+func (m *Model) approvePR() tea.Cmd {
 	iss := m.selectedIssue()
 	if iss == nil || iss.Workdir == "" {
 		return nil
@@ -241,34 +336,29 @@ func (m *Model) createPR() tea.Cmd {
 	repo := m.repo
 
 	m.appendLog(num, "")
-	m.appendLog(num, "🚀 Creating PR...")
-	m.updateLogViewport()
+	m.appendLog(num, "🚀 Pushing branch & creating PR...")
 
 	return func() tea.Msg {
-		// Push the branch
 		cmd := exec.Command("git", "push", "-u", "origin", "HEAD")
 		cmd.Dir = workdir
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return prResultMsg{issueNum: num, err: fmt.Errorf("git push failed: %s: %w", string(out), err)}
+			return prResultMsg{issueNum: num, err: fmt.Errorf("push: %s: %w", strings.TrimSpace(string(out)), err)}
 		}
 
-		// Get branch name
 		cmd = exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
 		cmd.Dir = workdir
 		branchOut, err := cmd.Output()
 		if err != nil {
-			return prResultMsg{issueNum: num, err: fmt.Errorf("getting branch: %w", err)}
+			return prResultMsg{issueNum: num, err: fmt.Errorf("branch: %w", err)}
 		}
 		branch := strings.TrimSpace(string(branchOut))
 
-		// Get commit log for body
 		cmd = exec.Command("git", "log", "--oneline", "main.."+branch)
 		cmd.Dir = workdir
 		logOut, _ := cmd.Output()
 
-		body := fmt.Sprintf("Fixes #%d\n\n## Commits\n```\n%s```\n\n🤖 Generated by issue-watcher agent", num, string(logOut))
+		body := fmt.Sprintf("Fixes #%d\n\n## Commits\n```\n%s```\n\n🤖 Generated by issue-watcher", num, string(logOut))
 
-		// Create PR
 		prTitle := fmt.Sprintf("Fix #%d: %s", num, title)
 		cmd = exec.Command("gh", "pr", "create",
 			"--repo", repo,
@@ -277,150 +367,26 @@ func (m *Model) createPR() tea.Cmd {
 			"--head", branch,
 		)
 		cmd.Dir = workdir
-
-		// Strip ANTHROPIC_API_KEY from env to avoid leaking
-		env := os.Environ()
-		filtered := make([]string, 0, len(env))
-		for _, e := range env {
-			if !strings.HasPrefix(e, "ANTHROPIC_API_KEY=") {
-				filtered = append(filtered, e)
-			}
-		}
-		cmd.Env = filtered
-
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			return prResultMsg{issueNum: num, err: fmt.Errorf("gh pr create failed: %s: %w", string(out), err)}
+			return prResultMsg{issueNum: num, err: fmt.Errorf("pr: %s: %w", strings.TrimSpace(string(out)), err)}
 		}
 
-		url := strings.TrimSpace(string(out))
-		return prResultMsg{issueNum: num, url: url}
+		return prResultMsg{issueNum: num, url: strings.TrimSpace(string(out))}
 	}
 }
 
 func (m *Model) handlePRResult(msg prResultMsg) {
 	if msg.err != nil {
-		m.appendLog(msg.issueNum, "❌ PR failed: "+msg.err.Error())
+		m.appendLog(msg.issueNum, "❌ "+msg.err.Error())
 	} else {
-		m.appendLog(msg.issueNum, "")
-		m.appendLog(msg.issueNum, "━━━ PR Created ━━━")
-		m.appendLog(msg.issueNum, "  "+msg.url)
-		m.appendLog(msg.issueNum, "━━━━━━━━━━━━━━━━━━")
-	}
-	m.updateLogViewport()
-}
-
-// generateCommit runs claude to write a commit message and commits.
-func (m *Model) generateCommit() tea.Cmd {
-	iss := m.selectedIssue()
-	if iss == nil || iss.Workdir == "" {
-		return nil
-	}
-
-	num := iss.Number
-	workdir := iss.Workdir
-
-	m.appendLog(num, "")
-	m.appendLog(num, "📝 Generating commit message...")
-	m.updateLogViewport()
-
-	return func() tea.Msg {
-		// Get the diff
-		cmd := exec.Command("git", "diff")
-		cmd.Dir = workdir
-		diffOut, err := cmd.Output()
-		if err != nil {
-			return commitResultMsg{issueNum: num, err: fmt.Errorf("git diff: %w", err)}
-		}
-
-		// Also get staged diff
-		cmd = exec.Command("git", "diff", "--cached")
-		cmd.Dir = workdir
-		stagedOut, _ := cmd.Output()
-
-		diff := string(diffOut) + string(stagedOut)
-		if strings.TrimSpace(diff) == "" {
-			// Maybe everything is already committed, check for untracked
-			cmd = exec.Command("git", "status", "--short")
-			cmd.Dir = workdir
-			statusOut, _ := cmd.Output()
-			if strings.TrimSpace(string(statusOut)) == "" {
-				return commitResultMsg{issueNum: num, err: fmt.Errorf("no changes to commit")}
-			}
-			diff = "Untracked files:\n" + string(statusOut)
-		}
-
-		// Truncate diff if very long
-		if len(diff) > 8000 {
-			diff = diff[:8000] + "\n... (truncated)"
-		}
-
-		prompt := fmt.Sprintf(`Write a concise git commit message for these changes.
-Return ONLY the commit message, nothing else. No markdown, no explanation.
-First line: short summary (max 72 chars).
-Then a blank line, then a brief body if needed.
-
-Diff:
-%s`, diff)
-
-		// Run claude to generate the message
-		claudeCmd := exec.Command("claude", "-p")
-		claudeCmd.Dir = workdir
-
-		// Strip env vars
-		env := os.Environ()
-		filtered := make([]string, 0, len(env))
-		for _, e := range env {
-			if !strings.HasPrefix(e, "ANTHROPIC_API_KEY=") &&
-				!strings.HasPrefix(e, "CLAUDECODE=") {
-				filtered = append(filtered, e)
-			}
-		}
-		claudeCmd.Env = filtered
-
-		claudeCmd.Stdin = strings.NewReader(prompt)
-		msgOut, err := claudeCmd.Output()
-		if err != nil {
-			return commitResultMsg{issueNum: num, err: fmt.Errorf("claude commit msg: %w", err)}
-		}
-
-		commitMsg := strings.TrimSpace(string(msgOut))
-		if commitMsg == "" {
-			return commitResultMsg{issueNum: num, err: fmt.Errorf("claude returned empty message")}
-		}
-
-		// Stage all changes
-		cmd = exec.Command("git", "add", "-A")
-		cmd.Dir = workdir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return commitResultMsg{issueNum: num, err: fmt.Errorf("git add: %s: %w", string(out), err)}
-		}
-
-		// Commit
-		cmd = exec.Command("git", "commit", "-m", commitMsg)
-		cmd.Dir = workdir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return commitResultMsg{issueNum: num, err: fmt.Errorf("git commit: %s: %w", string(out), err)}
-		}
-
-		return commitResultMsg{issueNum: num, message: commitMsg}
+		m.appendLog(msg.issueNum, "✅ PR: "+msg.url)
+		// Auto-expand to show the result
+		m.expanded[msg.issueNum] = true
 	}
 }
 
-func (m *Model) handleCommitResult(msg commitResultMsg) {
-	if msg.err != nil {
-		m.appendLog(msg.issueNum, "❌ Commit failed: "+msg.err.Error())
-	} else {
-		m.appendLog(msg.issueNum, "")
-		m.appendLog(msg.issueNum, "━━━ Committed ━━━")
-		for _, line := range strings.Split(msg.message, "\n") {
-			m.appendLog(msg.issueNum, "  "+line)
-		}
-		m.appendLog(msg.issueNum, "━━━━━━━━━━━━━━━━━")
-		m.appendLog(msg.issueNum, "  Press 'p' to open a PR")
-	}
-	m.updateLogViewport()
-}
+// --- Event handling ---
 
 func (m *Model) handleEvent(ev watcher.Event) {
 	switch ev.Kind {
@@ -432,29 +398,34 @@ func (m *Model) handleEvent(ev watcher.Event) {
 		m.issues = append(m.issues, watcher.TrackedIssue{
 			Number:    ev.IssueNum,
 			Title:     ev.Text,
+			Body:      ev.IssueBody,
+			Labels:    ev.IssueLabels,
+			URL:       ev.IssueURL,
 			Status:    watcher.StatusReacted,
 			StartedAt: ev.Timestamp,
 		})
 		m.logs[ev.IssueNum] = []string{}
-		m.appendLog(ev.IssueNum, "Issue discovered: "+ev.Text)
+		m.appendLog(ev.IssueNum, "Issue discovered")
 
 	case watcher.EventReacted:
 		m.updateIssueStatus(ev.IssueNum, watcher.StatusReacted)
-		m.appendLog(ev.IssueNum, "👀 "+ev.Text)
+		m.appendLog(ev.IssueNum, "👀 Reacted")
 
 	case watcher.EventCloneStart:
 		m.updateIssueStatus(ev.IssueNum, watcher.StatusCloning)
-		m.appendLog(ev.IssueNum, "📦 "+ev.Text)
+		m.appendLog(ev.IssueNum, "📦 Cloning...")
 
 	case watcher.EventCloneDone:
 		m.updateIssueStatus(ev.IssueNum, watcher.StatusCloneReady)
 		m.setWorkdir(ev.IssueNum, ev.Text)
-		m.appendLog(ev.IssueNum, "📂 Cloned to "+ev.Text)
+		m.appendLog(ev.IssueNum, "📂 "+ev.Text)
 
 	case watcher.EventClaudeStart:
 		m.updateIssueStatus(ev.IssueNum, watcher.StatusClaudeRunning)
 		m.activeCount++
-		m.appendLog(ev.IssueNum, "🤖 "+ev.Text)
+		m.appendLog(ev.IssueNum, "🤖 Claude working...")
+		// Auto-expand active issues
+		m.expanded[ev.IssueNum] = true
 
 	case watcher.EventClaudeLog:
 		m.appendLog(ev.IssueNum, "  "+ev.Text)
@@ -468,14 +439,7 @@ func (m *Model) handleEvent(ev watcher.Event) {
 	case watcher.EventReady:
 		m.updateIssueStatus(ev.IssueNum, watcher.StatusReady)
 		m.readyCount++
-		m.appendLog(ev.IssueNum, "")
-		m.appendLog(ev.IssueNum, "━━━ Ready for review ━━━")
-		m.appendLog(ev.IssueNum, "  l  lazygit — review & commit")
-		m.appendLog(ev.IssueNum, "  c  generate commit message")
-		m.appendLog(ev.IssueNum, "  d  view diff")
-		m.appendLog(ev.IssueNum, "  p  push & open PR")
-		m.appendLog(ev.IssueNum, "  o  open in Finder")
-		m.appendLog(ev.IssueNum, "━━━━━━━━━━━━━━━━━━━━━━━━")
+		m.appendLog(ev.IssueNum, "✅ Ready — press 'a' to approve & open PR")
 
 	case watcher.EventError:
 		if m.findIssueStatus(ev.IssueNum) == watcher.StatusClaudeRunning {
@@ -486,16 +450,11 @@ func (m *Model) handleEvent(ev watcher.Event) {
 		m.updateIssueStatus(ev.IssueNum, watcher.StatusFailed)
 		m.failCount++
 		m.setError(ev.IssueNum, ev.Text)
-		m.appendLog(ev.IssueNum, "")
-		m.appendLog(ev.IssueNum, "━━━ Failed ━━━")
-		m.appendLog(ev.IssueNum, "  "+ev.Text)
-		m.appendLog(ev.IssueNum, "━━━━━━━━━━━━━━")
+		m.appendLog(ev.IssueNum, "❌ "+ev.Text)
 
 	case watcher.EventPollDone:
-		m.appendLog(0, ev.Text)
+		// Don't log routine poll results
 	}
-
-	m.updateLogViewport()
 }
 
 func (m *Model) findIssueStatus(num int) watcher.IssueStatus {
@@ -544,59 +503,6 @@ func (m *Model) appendLog(num int, line string) {
 	}
 }
 
-func (m *Model) updateLogViewport() {
-	if m.cursor >= 0 && m.cursor < len(m.issues) {
-		num := m.issues[m.cursor].Number
-		content := ""
-		for _, line := range m.logs[num] {
-			content += line + "\n"
-		}
-		m.logViewport.SetContent(content)
-		m.logViewport.GotoBottom()
-	}
-}
-
-func (m *Model) openWorkdir() {
-	if iss := m.selectedIssue(); iss != nil && iss.Workdir != "" {
-		exec.Command("open", iss.Workdir).Start()
-	}
-}
-
-func (m *Model) showDiff() {
-	iss := m.selectedIssue()
-	if iss == nil || iss.Workdir == "" {
-		return
-	}
-
-	cmd := exec.Command("git", "diff")
-	cmd.Dir = iss.Workdir
-	out, err := cmd.Output()
-	if err == nil {
-		m.appendLog(iss.Number, "--- git diff ---")
-		for _, line := range splitLines(string(out)) {
-			m.appendLog(iss.Number, line)
-		}
-		m.appendLog(iss.Number, "--- end diff ---")
-		m.updateLogViewport()
-	}
-}
-
-func splitLines(s string) []string {
-	var lines []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			lines = append(lines, s[start:i])
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		lines = append(lines, s[start:])
-	}
-	return lines
-}
-
-// elapsed returns a human-readable elapsed time string.
 func elapsed(start time.Time, now time.Time) string {
 	d := now.Sub(start)
 	if d < time.Minute {
