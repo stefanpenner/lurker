@@ -135,9 +135,6 @@ func (m Model) renderTable() string {
 		}
 
 		workdir := iss.Workdir
-		if len(workdir) > 20 {
-			workdir = "…" + workdir[len(workdir)-19:]
-		}
 
 		row := fmt.Sprintf("  %-5d %s %-8s %-8s %-28s %s",
 			iss.Number, statusIcon, statusLabel, elapsedStr, title, workdir)
