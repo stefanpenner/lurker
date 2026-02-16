@@ -413,7 +413,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.focus = focusConfirm
 		}
 	case "S":
-		m.resumeAllPaused()
+		m.startAllStopped()
 	case "?":
 		m.focus = focusHelp
 	}
@@ -480,18 +480,31 @@ func (m *Model) toggleIssueProcessing() {
 	}
 }
 
-func (m *Model) resumeAllPaused() {
+func (m *Model) startAllStopped() {
 	for i := range m.issues {
 		iss := &m.issues[i]
-		if iss.Status != watcher.StatusPaused {
-			continue
-		}
 		key := issueKey(iss.Repo, iss.Number)
-		m.ensurePtySession(key, m.ptyWorkdir(iss))
-		m.manager.StartIssue(iss.Repo, iss.Number)
-		iss.Status = watcher.StatusReacted
-		m.appendLog(key, "▶ Resumed")
-		m.expanded[key] = true
+		switch iss.Status {
+		case watcher.StatusPending:
+			m.ensurePtySession(key, m.ptyWorkdir(iss))
+			m.manager.StartIssue(iss.Repo, iss.Number)
+			iss.Status = watcher.StatusReacted
+			m.appendLog(key, "▶ Started")
+			m.expanded[key] = true
+		case watcher.StatusPaused:
+			m.ensurePtySession(key, m.ptyWorkdir(iss))
+			m.manager.StartIssue(iss.Repo, iss.Number)
+			iss.Status = watcher.StatusReacted
+			m.appendLog(key, "▶ Resumed")
+			m.expanded[key] = true
+		case watcher.StatusFailed:
+			m.ensurePtySession(key, m.ptyWorkdir(iss))
+			m.manager.StartIssue(iss.Repo, iss.Number)
+			iss.Status = watcher.StatusReacted
+			iss.Error = ""
+			m.appendLog(key, "▶ Retrying")
+			m.expanded[key] = true
+		}
 	}
 }
 
@@ -680,7 +693,7 @@ func (m *Model) launchClaudeFor(iss *watcher.TrackedIssue) tea.Cmd {
 	}
 
 	// Send claude command to the PTY shell, then attach
-	session.ptmx.Write([]byte("cd " + iss.Workdir + " && env -u ANTHROPIC_API_KEY -u CLAUDECODE claude\n"))
+	session.ptmx.Write([]byte("claude\n"))
 
 	return tea.Exec(&ptyAttacher{session: session, label: key}, func(err error) tea.Msg {
 		return nil
@@ -720,7 +733,7 @@ func (m *Model) takeoverClaudeFor(iss *watcher.TrackedIssue) tea.Cmd {
 	}
 
 	// Send claude --continue to the PTY shell, then attach
-	session.ptmx.Write([]byte("cd " + iss.Workdir + " && env -u ANTHROPIC_API_KEY -u CLAUDECODE claude --continue\n"))
+	session.ptmx.Write([]byte("claude --continue\n"))
 
 	return tea.Exec(&ptyAttacher{session: session, label: key}, func(err error) tea.Msg {
 		return interactiveClaudeDoneMsg{repo: iss.Repo, num: iss.Number, workdir: iss.Workdir}
