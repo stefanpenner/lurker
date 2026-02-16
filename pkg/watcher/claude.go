@@ -53,110 +53,136 @@ analysis, proposed approach, and open questions.`,
 		issue.Number, issue.Title, issue.LabelNames(), issue.Body, issue.Number)
 }
 
-// streamEvent represents a single JSON event from claude --output-format stream-json.
+// Stream-json event types from claude --output-format stream-json.
+// The actual format has:
+//   {"type":"system","subtype":"init",...}
+//   {"type":"assistant","message":{"content":[{"type":"text","text":"..."},{"type":"tool_use","name":"Read","input":{...}}]}}
+//   {"type":"result","total_cost_usd":0.03,"duration_ms":15000,"num_turns":5,...}
+
 type streamEvent struct {
-	Type       string          `json:"type"`
-	SubType    string          `json:"subtype,omitempty"`
-	Tool       string          `json:"tool,omitempty"`
-	Content    string          `json:"content,omitempty"`
-	Input      json.RawMessage `json:"input,omitempty"`
-	CostUSD    float64         `json:"cost_usd,omitempty"`
-	DurationMS float64         `json:"duration_ms,omitempty"`
-	// For assistant messages with content blocks
-	Message struct {
-		Content []contentBlock `json:"content,omitempty"`
-	} `json:"message,omitempty"`
+	Type    string `json:"type"`
+	SubType string `json:"subtype,omitempty"`
+	Error   string `json:"error,omitempty"`
+
+	// For assistant events
+	Message *assistantMessage `json:"message,omitempty"`
+
+	// For result events
+	TotalCostUSD float64 `json:"total_cost_usd,omitempty"`
+	DurationMS   float64 `json:"duration_ms,omitempty"`
+	NumTurns     int     `json:"num_turns,omitempty"`
+	Result       string  `json:"result,omitempty"`
+	IsError      bool    `json:"is_error,omitempty"`
+}
+
+type assistantMessage struct {
+	Content []contentBlock `json:"content,omitempty"`
 }
 
 type contentBlock struct {
-	Type  string `json:"type"`
-	Text  string `json:"text,omitempty"`
-	Name  string `json:"name,omitempty"`
-	Input struct {
-		Command  string `json:"command,omitempty"`
-		FilePath string `json:"file_path,omitempty"`
-		Pattern  string `json:"pattern,omitempty"`
-		Query    string `json:"query,omitempty"`
-	} `json:"input,omitempty"`
+	Type  string          `json:"type"`
+	Text  string          `json:"text,omitempty"`
+	Name  string          `json:"name,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
 }
 
 // LogFunc is called with each line of Claude's output.
 type LogFunc func(line string)
 
-// formatStreamEvent turns a stream-json event into a human-readable log line.
-// Returns empty string if the event should be suppressed.
-func formatStreamEvent(raw string) string {
+// formatStreamEvent turns a stream-json event into human-readable log lines.
+// Returns nil if the event should be suppressed.
+func formatStreamEvent(raw string) []string {
 	var ev streamEvent
 	if err := json.Unmarshal([]byte(raw), &ev); err != nil {
-		return ""
+		return nil
 	}
 
 	switch ev.Type {
-	case "assistant":
-		// Text output from Claude
-		if ev.SubType == "text" && ev.Content != "" {
-			// Truncate long text to keep the log readable
-			text := ev.Content
-			if len(text) > 200 {
-				text = text[:200] + "…"
-			}
-			return text
-		}
-		// Tool use
-		if ev.SubType == "tool_use" {
-			return formatToolUse(ev)
-		}
-
-	case "tool_result", "result":
-		// Tool results can be very verbose, just note completion
-		if ev.SubType == "tool_result" {
-			return ""
-		}
-		if ev.Type == "result" {
-			cost := ""
-			if ev.CostUSD > 0 {
-				cost = fmt.Sprintf(" ($%.4f)", ev.CostUSD)
-			}
-			dur := ""
-			if ev.DurationMS > 0 {
-				secs := ev.DurationMS / 1000
-				if secs >= 60 {
-					dur = fmt.Sprintf(" (%.0fm%.0fs)", secs/60, float64(int(secs)%60))
-				} else {
-					dur = fmt.Sprintf(" (%.1fs)", secs)
-				}
-			}
-			return fmt.Sprintf("✓ Done%s%s", dur, cost)
-		}
-
 	case "system":
 		if ev.SubType == "init" {
-			return "Claude session initialized"
+			return []string{"Claude session initialized"}
 		}
-		return ""
+		return nil
+
+	case "assistant":
+		if ev.Error != "" {
+			return []string{fmt.Sprintf("⚠ Error: %s", ev.Error)}
+		}
+		if ev.Message == nil {
+			return nil
+		}
+		var lines []string
+		for _, block := range ev.Message.Content {
+			switch block.Type {
+			case "text":
+				text := strings.TrimSpace(block.Text)
+				if text == "" {
+					continue
+				}
+				// Show first ~200 chars of text output
+				if len(text) > 200 {
+					text = text[:200] + "…"
+				}
+				// Split multi-line text into separate log lines
+				for _, line := range strings.Split(text, "\n") {
+					line = strings.TrimSpace(line)
+					if line != "" {
+						lines = append(lines, line)
+					}
+				}
+			case "tool_use":
+				if line := formatToolUse(block); line != "" {
+					lines = append(lines, line)
+				}
+			}
+		}
+		return lines
+
+	case "result":
+		cost := ""
+		if ev.TotalCostUSD > 0 {
+			cost = fmt.Sprintf(" ($%.4f)", ev.TotalCostUSD)
+		}
+		dur := ""
+		if ev.DurationMS > 0 {
+			secs := ev.DurationMS / 1000
+			if secs >= 60 {
+				dur = fmt.Sprintf(" %.0fm%.0fs", secs/60, float64(int(secs)%60))
+			} else {
+				dur = fmt.Sprintf(" %.1fs", secs)
+			}
+		}
+		turns := ""
+		if ev.NumTurns > 0 {
+			turns = fmt.Sprintf(" %d turns", ev.NumTurns)
+		}
+		if ev.IsError {
+			msg := ev.Result
+			if len(msg) > 100 {
+				msg = msg[:100] + "…"
+			}
+			return []string{fmt.Sprintf("✗ Failed:%s%s — %s", dur, cost, msg)}
+		}
+		return []string{fmt.Sprintf("✓ Done%s%s%s", dur, turns, cost)}
 	}
 
-	return ""
+	return nil
 }
 
-func formatToolUse(ev streamEvent) string {
-	tool := ev.Tool
+func formatToolUse(block contentBlock) string {
+	tool := block.Name
 	if tool == "" {
-		// Try to parse from content
 		return ""
 	}
 
-	// Parse the input to get useful details
 	var input struct {
 		Command  string `json:"command"`
 		FilePath string `json:"file_path"`
 		Pattern  string `json:"pattern"`
 		Path     string `json:"path"`
-		OldStr   string `json:"old_string"`
-		Content  string `json:"content"`
 	}
-	if ev.Input != nil {
-		json.Unmarshal(ev.Input, &input)
+	if block.Input != nil {
+		json.Unmarshal(block.Input, &input)
 	}
 
 	switch tool {
@@ -165,8 +191,7 @@ func formatToolUse(ev streamEvent) string {
 	case "Write":
 		return fmt.Sprintf("📝 Write %s", input.FilePath)
 	case "Edit":
-		path := input.FilePath
-		return fmt.Sprintf("✏️  Edit %s", path)
+		return fmt.Sprintf("✏️  Edit %s", input.FilePath)
 	case "Glob":
 		return fmt.Sprintf("🔍 Glob %s", input.Pattern)
 	case "Grep":
@@ -181,6 +206,8 @@ func formatToolUse(ev streamEvent) string {
 			cmd = cmd[:80] + "…"
 		}
 		return fmt.Sprintf("$ %s", cmd)
+	case "Task":
+		return "🤖 Spawning sub-agent"
 	default:
 		return fmt.Sprintf("🔧 %s", tool)
 	}
@@ -192,6 +219,7 @@ func RunClaude(ctx context.Context, workdir string, prompt string, logFn LogFunc
 	cmd := exec.CommandContext(ctx, "claude",
 		"-p",
 		"--output-format", "stream-json",
+		"--verbose",
 		"--allowedTools", claudeTools,
 	)
 	cmd.Dir = workdir
@@ -201,7 +229,8 @@ func RunClaude(ctx context.Context, workdir string, prompt string, logFn LogFunc
 	env := os.Environ()
 	filtered := make([]string, 0, len(env))
 	for _, e := range env {
-		if !strings.HasPrefix(e, "ANTHROPIC_API_KEY=") {
+		if !strings.HasPrefix(e, "ANTHROPIC_API_KEY=") &&
+			!strings.HasPrefix(e, "CLAUDECODE=") {
 			filtered = append(filtered, e)
 		}
 	}
@@ -258,7 +287,8 @@ func RunClaude(ctx context.Context, workdir string, prompt string, logFn LogFunc
 		output.WriteString("\n")
 
 		if logFn != nil {
-			if line := formatStreamEvent(raw); line != "" {
+			lines := formatStreamEvent(raw)
+			for _, line := range lines {
 				logFn(line)
 			}
 		}

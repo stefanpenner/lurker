@@ -68,11 +68,12 @@ func (s IssueStatus) String() string {
 
 // TrackedIssue represents an issue being processed by the watcher.
 type TrackedIssue struct {
-	Number  int
-	Title   string
-	Status  IssueStatus
-	Workdir string
-	Error   string
+	Number    int
+	Title     string
+	Status    IssueStatus
+	Workdir   string
+	Error     string
+	StartedAt time.Time
 }
 
 // persistedState is saved to state.json to remember processed issues across runs.

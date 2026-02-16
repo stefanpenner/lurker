@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"os/exec"
 	"time"
 
@@ -29,12 +30,14 @@ type Model struct {
 	pollCount   int
 	activeCount int
 	failCount   int
+	readyCount  int
+	now         time.Time // updated every tick for elapsed time display
 }
 
 // eventMsg wraps a watcher.Event for Bubbletea.
 type eventMsg watcher.Event
 
-// tickMsg triggers periodic event channel reads.
+// tickMsg triggers periodic event channel reads and time updates.
 type tickMsg struct{}
 
 // NewModel creates a new TUI Model.
@@ -52,6 +55,7 @@ func NewModel(repo string, eventCh <-chan watcher.Event) Model {
 		watching:    true,
 		repo:        repo,
 		eventCh:     eventCh,
+		now:         time.Now(),
 	}
 }
 
@@ -119,10 +123,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 
 	case eventMsg:
+		m.now = time.Now()
 		m.handleEvent(watcher.Event(msg))
 		cmds = append(cmds, m.pollEvents())
 
 	case tickMsg:
+		m.now = time.Now()
 		cmds = append(cmds, m.pollEvents())
 	}
 
@@ -137,52 +143,80 @@ func (m *Model) handleEvent(ev watcher.Event) {
 
 	case watcher.EventIssueFound:
 		m.issues = append(m.issues, watcher.TrackedIssue{
-			Number: ev.IssueNum,
-			Title:  ev.Text,
-			Status: watcher.StatusReacted,
+			Number:    ev.IssueNum,
+			Title:     ev.Text,
+			Status:    watcher.StatusReacted,
+			StartedAt: ev.Timestamp,
 		})
 		m.logs[ev.IssueNum] = []string{}
+		m.appendLog(ev.IssueNum, "Issue discovered: "+ev.Text)
 
 	case watcher.EventReacted:
 		m.updateIssueStatus(ev.IssueNum, watcher.StatusReacted)
-		m.appendLog(ev.IssueNum, ev.Text)
+		m.appendLog(ev.IssueNum, "👀 "+ev.Text)
 
 	case watcher.EventCloneStart:
 		m.updateIssueStatus(ev.IssueNum, watcher.StatusCloning)
-		m.appendLog(ev.IssueNum, ev.Text)
+		m.appendLog(ev.IssueNum, "📦 "+ev.Text)
 
 	case watcher.EventCloneDone:
 		m.updateIssueStatus(ev.IssueNum, watcher.StatusCloneReady)
 		m.setWorkdir(ev.IssueNum, ev.Text)
-		m.appendLog(ev.IssueNum, "Clone complete: "+ev.Text)
+		m.appendLog(ev.IssueNum, "📂 Cloned to "+ev.Text)
 
 	case watcher.EventClaudeStart:
 		m.updateIssueStatus(ev.IssueNum, watcher.StatusClaudeRunning)
 		m.activeCount++
-		m.appendLog(ev.IssueNum, ev.Text)
+		m.appendLog(ev.IssueNum, "🤖 "+ev.Text)
 
 	case watcher.EventClaudeLog:
-		m.appendLog(ev.IssueNum, "> "+ev.Text)
+		m.appendLog(ev.IssueNum, "  "+ev.Text)
 
 	case watcher.EventClaudeDone:
-		m.activeCount--
+		if m.activeCount > 0 {
+			m.activeCount--
+		}
 		m.appendLog(ev.IssueNum, ev.Text)
 
 	case watcher.EventReady:
 		m.updateIssueStatus(ev.IssueNum, watcher.StatusReady)
-		m.appendLog(ev.IssueNum, "Ready for review!")
+		m.readyCount++
+		m.appendLog(ev.IssueNum, "")
+		m.appendLog(ev.IssueNum, "━━━ Ready for review ━━━")
+		m.appendLog(ev.IssueNum, "  Workdir: "+ev.Text)
+		m.appendLog(ev.IssueNum, "  Press 'o' to open in Finder")
+		m.appendLog(ev.IssueNum, "  Press 'd' to view diff")
+		m.appendLog(ev.IssueNum, "  cd "+ev.Text+" && git log --oneline -5")
+		m.appendLog(ev.IssueNum, "━━━━━━━━━━━━━━━━━━━━━━━━")
 
 	case watcher.EventError:
+		if m.findIssueStatus(ev.IssueNum) == watcher.StatusClaudeRunning {
+			if m.activeCount > 0 {
+				m.activeCount--
+			}
+		}
 		m.updateIssueStatus(ev.IssueNum, watcher.StatusFailed)
 		m.failCount++
 		m.setError(ev.IssueNum, ev.Text)
-		m.appendLog(ev.IssueNum, "ERROR: "+ev.Text)
+		m.appendLog(ev.IssueNum, "")
+		m.appendLog(ev.IssueNum, "━━━ Failed ━━━")
+		m.appendLog(ev.IssueNum, "  "+ev.Text)
+		m.appendLog(ev.IssueNum, "━━━━━━━━━━━━━━")
 
 	case watcher.EventPollDone:
 		m.appendLog(0, ev.Text)
 	}
 
 	m.updateLogViewport()
+}
+
+func (m *Model) findIssueStatus(num int) watcher.IssueStatus {
+	for _, iss := range m.issues {
+		if iss.Number == num {
+			return iss.Status
+		}
+	}
+	return watcher.StatusReacted
 }
 
 func (m *Model) updateIssueStatus(num int, status watcher.IssueStatus) {
@@ -276,4 +310,13 @@ func splitLines(s string) []string {
 		lines = append(lines, s[start:])
 	}
 	return lines
+}
+
+// elapsed returns a human-readable elapsed time string.
+func elapsed(start time.Time, now time.Time) string {
+	d := now.Sub(start)
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
 }

@@ -74,27 +74,34 @@ func (m Model) renderStatusBar() string {
 	}
 
 	processed := fmt.Sprintf("%d processed", len(m.issues))
-	active := fmt.Sprintf("%d active", m.activeCount)
-	failed := fmt.Sprintf("%d failed", m.failCount)
 
-	return statusBarStyle.Render(fmt.Sprintf("  %s   %s   %s   %s",
-		status, processed, active, failed))
+	active := lipgloss.NewStyle().Foreground(colorYellow).Render(
+		fmt.Sprintf("%d active", m.activeCount))
+
+	ready := lipgloss.NewStyle().Foreground(colorGreen).Render(
+		fmt.Sprintf("%d ready", m.readyCount))
+
+	failed := lipgloss.NewStyle().Foreground(colorRed).Render(
+		fmt.Sprintf("%d failed", m.failCount))
+
+	return statusBarStyle.Render(fmt.Sprintf("  %s   %s   %s   %s   %s",
+		status, processed, active, ready, failed))
 }
 
 func (m Model) renderTable() string {
 	var b strings.Builder
 
 	header := tableHeaderStyle.Render(
-		fmt.Sprintf("  %-5s %-10s %-30s %s", "#", "Status", "Issue", "Workdir"))
+		fmt.Sprintf("  %-5s %-10s %-8s %-28s %s", "#", "Status", "Time", "Issue", "Workdir"))
 	b.WriteString(header)
 	b.WriteString("\n")
 
 	if len(m.issues) == 0 {
-		b.WriteString(normalRowStyle.Render("  No issues yet..."))
+		b.WriteString(normalRowStyle.Render("  Waiting for issues..."))
 		b.WriteString("\n")
 	}
 
-	// Show up to 10 visible issues around the cursor
+	// Show up to 8 visible issues around the cursor
 	start := 0
 	end := len(m.issues)
 	maxVisible := 8
@@ -115,9 +122,16 @@ func (m Model) renderTable() string {
 		statusIcon := m.statusIcon(iss.Status)
 		statusLabel := m.statusLabel(iss.Status)
 
+		// Elapsed time
+		elapsedStr := elapsed(iss.StartedAt, m.now)
+		if iss.Status == watcher.StatusClaudeRunning {
+			// Show spinner for active issues
+			elapsedStr = m.spinner.View() + " " + elapsedStr
+		}
+
 		title := iss.Title
-		if len(title) > 28 {
-			title = title[:28] + "…"
+		if len(title) > 26 {
+			title = title[:26] + "…"
 		}
 
 		workdir := iss.Workdir
@@ -125,8 +139,8 @@ func (m Model) renderTable() string {
 			workdir = "…" + workdir[len(workdir)-19:]
 		}
 
-		row := fmt.Sprintf("  %-5d %s %-8s %-30s %s",
-			iss.Number, statusIcon, statusLabel, title, workdir)
+		row := fmt.Sprintf("  %-5d %s %-8s %-8s %-28s %s",
+			iss.Number, statusIcon, statusLabel, elapsedStr, title, workdir)
 
 		if i == m.cursor {
 			b.WriteString(selectedRowStyle.Render(row))
@@ -182,7 +196,12 @@ func (m Model) renderLogPanel() string {
 
 	header := "Logs"
 	if m.cursor >= 0 && m.cursor < len(m.issues) {
-		header = fmt.Sprintf("Logs (issue #%d)", m.issues[m.cursor].Number)
+		iss := m.issues[m.cursor]
+		logCount := len(m.logs[iss.Number])
+		header = fmt.Sprintf("Logs (issue #%d) — %d lines", iss.Number, logCount)
+		if iss.Status == watcher.StatusClaudeRunning {
+			header += " " + m.spinner.View()
+		}
 	}
 	b.WriteString(logHeaderStyle.Render(header))
 	b.WriteString("\n")
