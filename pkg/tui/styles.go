@@ -60,7 +60,8 @@ var (
 				Bold(true).
 				Foreground(colorBlue)
 
-	statusReadyStyle   = lipgloss.NewStyle().Foreground(colorGreen)
+	statusReadyStyle     = lipgloss.NewStyle().Foreground(colorGreen)
+	statusReadyBoldStyle = lipgloss.NewStyle().Foreground(colorGreen).Bold(true)
 	statusRunningStyle = lipgloss.NewStyle().Foreground(colorYellow)
 	statusFailedStyle  = lipgloss.NewStyle().Foreground(colorRed)
 	statusReactedStyle = lipgloss.NewStyle().Foreground(colorBlue)
