@@ -26,10 +26,11 @@ type focus int
 
 const (
 	focusList   focus = iota
-	focusLogs         // scrolling within an expanded issue's logs
+	focusLogs         // scrolling within an expanded issue's logs (legacy, kept for focus view)
 	focusDialog       // detail dialog open
 	focusInput        // text input for adding repo
 	focusFocus        // full-screen focus view of a single issue
+	focusHelp         // help screen overlay
 )
 
 // itemKind distinguishes tree items.
@@ -140,6 +141,7 @@ func (m Model) pollEvents() tea.Cmd {
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+	prevFocus := m.focus
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -175,12 +177,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.handlePRResult(msg)
 	}
 
-	// Forward messages to textinput when focused (for cursor blink etc.)
+	// Forward messages to textinput when focused, but skip the keypress
+	// that activated input mode (otherwise 'r' leaks into the field).
 	if m.focus == focusInput {
-		var cmd tea.Cmd
-		m.textInput, cmd = m.textInput.Update(msg)
-		if cmd != nil {
-			cmds = append(cmds, cmd)
+		_, isKey := msg.(tea.KeyMsg)
+		if isKey && prevFocus != focusInput {
+			// Skip — this is the keypress that triggered input mode
+		} else {
+			var cmd tea.Cmd
+			m.textInput, cmd = m.textInput.Update(msg)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 		}
 	}
 
@@ -260,9 +268,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
-	// Dialog mode
-	if m.focus == focusDialog {
-		if key == "esc" {
+	// Dialog mode (info or help)
+	if m.focus == focusDialog || m.focus == focusHelp {
+		if key == "esc" || key == "?" {
 			m.focus = focusList
 			m.dialogIssue = nil
 		}
@@ -308,33 +316,6 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return tea.Quit
 	}
 
-	// Log scroll mode
-	if m.focus == focusLogs {
-		switch key {
-		case "esc", "l":
-			m.focus = focusList
-		case "j", "down":
-			m.logScroll++
-			m.clampLogScroll()
-		case "k", "up":
-			if m.logScroll > 0 {
-				m.logScroll--
-			}
-		case "g":
-			m.logScroll = 0
-		case "G":
-			m.logScroll = 999999
-			m.clampLogScroll()
-		case "o":
-			m.openGithubIssue()
-		case "a":
-			return m.approvePRFor(m.selectedIssue())
-		case " ":
-			m.toggleIssueProcessing()
-		}
-		return nil
-	}
-
 	// Normal list mode
 	items := m.visibleItems()
 	switch key {
@@ -355,8 +336,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 		if item.kind == itemRepo {
 			m.repoExpanded[item.repo] = !m.repoExpanded[item.repo]
-		} else {
-			m.toggleLogs()
+		} else if iss := m.selectedIssue(); iss != nil {
+			m.focusIssue = iss
+			m.focusScroll = 999999
+			m.clampFocusScroll()
+			m.focus = focusFocus
 		}
 	case " ":
 		item := m.cursorItem()
@@ -367,15 +351,6 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.repoExpanded[item.repo] = !m.repoExpanded[item.repo]
 		} else {
 			m.toggleIssueProcessing()
-		}
-	case "tab":
-		if iss := m.selectedIssue(); iss != nil {
-			key := issueKey(iss.Repo, iss.Number)
-			if m.expanded[key] {
-				m.focus = focusLogs
-				m.logScroll = 999999
-				m.clampLogScroll()
-			}
 		}
 	case "f":
 		if iss := m.selectedIssue(); iss != nil {
@@ -399,6 +374,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return m.textInput.Focus()
 	case "R", "d":
 		m.removeSelectedRepo()
+	case "?":
+		m.focus = focusHelp
 	}
 
 	return nil
@@ -432,18 +409,6 @@ func (m *Model) toggleIssueProcessing() {
 		iss.Error = ""
 		m.appendLog(key, "▶ Retrying")
 		m.expanded[key] = true
-	}
-}
-
-func (m *Model) toggleLogs() {
-	if iss := m.selectedIssue(); iss != nil {
-		key := issueKey(iss.Repo, iss.Number)
-		m.expanded[key] = !m.expanded[key]
-		if !m.expanded[key] {
-			if m.focus == focusLogs {
-				m.focus = focusList
-			}
-		}
 	}
 }
 
@@ -506,22 +471,6 @@ func (m *Model) toggleFocusIssueProcessing() {
 	}
 }
 
-func (m *Model) clampLogScroll() {
-	iss := m.selectedIssue()
-	if iss == nil {
-		return
-	}
-	key := issueKey(iss.Repo, iss.Number)
-	lines := m.logs[key]
-	maxScroll := len(lines) - maxVisibleLogs
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
-	if m.logScroll > maxScroll {
-		m.logScroll = maxScroll
-	}
-}
-
 func (m *Model) ensureCursorVisible() {
 	items := m.visibleItems()
 	if m.cursor < 0 || m.cursor >= len(items) {
@@ -531,20 +480,8 @@ func (m *Model) ensureCursorVisible() {
 	lineOffset := 0
 	for i := 0; i < m.cursor; i++ {
 		lineOffset++ // the item line itself
-		if items[i].kind == itemRepo {
-			if m.repoErrors[items[i].repo] != "" {
-				lineOffset++ // error line beneath repo
-			}
-		} else if items[i].kind == itemIssue {
-			iss := m.issues[items[i].issueIdx]
-			key := issueKey(iss.Repo, iss.Number)
-			if m.expanded[key] {
-				n := len(m.logs[key])
-				if n > maxVisibleLogs {
-					n = maxVisibleLogs
-				}
-				lineOffset += n
-			}
+		if items[i].kind == itemRepo && m.repoErrors[items[i].repo] != "" {
+			lineOffset++ // error line beneath repo
 		}
 	}
 

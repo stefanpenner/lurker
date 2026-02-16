@@ -77,6 +77,11 @@ func (m Model) View() string {
 		return m.renderWithDialog(b.String())
 	}
 
+	// Help overlay
+	if m.focus == focusHelp {
+		return m.renderHelpScreen()
+	}
+
 	return b.String()
 }
 
@@ -155,7 +160,7 @@ func (m Model) renderStatusBar() string {
 	return "  " + strings.Join(parts, sep)
 }
 
-// renderTree renders the scrollable tree of repos and issues with inline logs.
+// renderTree renders the scrollable tree of repos and issues.
 func (m Model) renderTree() string {
 	var allLines []string
 	items := m.visibleItems()
@@ -175,50 +180,7 @@ func (m Model) renderTree() string {
 
 		case itemIssue:
 			iss := m.issues[item.issueIdx]
-			key := issueKey(iss.Repo, iss.Number)
 			allLines = append(allLines, m.renderIssueLine(iss, isSelected))
-
-			if m.expanded[key] {
-				logLines := m.logs[key]
-				visibleLogs := logLines
-
-				if m.focus == focusLogs && isSelected {
-					start := m.logScroll
-					end := start + maxVisibleLogs
-					if start > len(logLines) {
-						start = len(logLines)
-					}
-					if end > len(logLines) {
-						end = len(logLines)
-					}
-					visibleLogs = logLines[start:end]
-
-					if start > 0 {
-						allLines = append(allLines, logLineStyle.Render("            "+headerDimStyle.Render("^^^ more ^^^")))
-					}
-				} else {
-					if len(visibleLogs) > maxVisibleLogs {
-						visibleLogs = visibleLogs[len(visibleLogs)-maxVisibleLogs:]
-					}
-				}
-
-				isActive := iss.Status == watcher.StatusClaudeRunning
-				for _, line := range visibleLogs {
-					prefix := "            "
-					if isActive {
-						allLines = append(allLines, logLineActiveStyle.Render(prefix+line))
-					} else {
-						allLines = append(allLines, logLineStyle.Render(prefix+line))
-					}
-				}
-
-				if m.focus == focusLogs && isSelected {
-					end := m.logScroll + maxVisibleLogs
-					if end < len(logLines) {
-						allLines = append(allLines, logLineStyle.Render("            "+headerDimStyle.Render("vvv more vvv")))
-					}
-				}
-			}
 		}
 	}
 
@@ -398,21 +360,20 @@ func (m Model) renderBeadsCompact(status watcher.IssueStatus) string {
 
 func (m Model) renderIssueLine(iss watcher.TrackedIssue, selected bool) string {
 	key := issueKey(iss.Repo, iss.Number)
-
-	// Expand indicator
-	expandIcon := headerDimStyle.Render(">")
-	if m.expanded[key] {
-		expandIcon = headerDimStyle.Render("v")
-	}
 	logCount := len(m.logs[key])
 
 	// Compact bead pipeline (9 chars visual: "x-x-x-o-o")
 	beadStr := m.renderBeadsCompact(iss.Status)
 
-	// Elapsed time
+	// Elapsed time (with spinner prefix for active statuses)
 	var elapsedStr string
 	if iss.Status != watcher.StatusPending {
-		elapsedStr = elapsed(iss.StartedAt, m.now)
+		el := elapsed(iss.StartedAt, m.now)
+		if isActive(iss.Status) {
+			elapsedStr = m.spinner.View() + " " + el
+		} else {
+			elapsedStr = el
+		}
 	}
 
 	// Issue reference
@@ -423,17 +384,15 @@ func (m Model) renderIssueLine(iss watcher.TrackedIssue, selected bool) string {
 	issueRef := fmt.Sprintf("#%d %s", iss.Number, title)
 	issueRef = hyperlink(iss.URL, issueRef)
 
-	// Build the line with fixed-width columns:
-	//   col 1: indent + expand (6 chars)
+	// Build the line:
+	//   col 1: indent (4 chars)
 	//   col 2: beads (compact, ~9 chars)
 	//   col 3: issue ref (variable)
-	//   col 4: elapsed (right side, 8 chars)
+	//   col 4: elapsed + spinner (right side)
 	//   col 5: log count
 
 	var line strings.Builder
-	line.WriteString("    ")
-	line.WriteString(expandIcon)
-	line.WriteString(" ")
+	line.WriteString("      ")
 	line.WriteString(beadStr)
 	line.WriteString("  ")
 	line.WriteString(issueRef)
@@ -456,6 +415,14 @@ func (m Model) renderIssueLine(iss watcher.TrackedIssue, selected bool) string {
 		return statusReadyBoldStyle.Render(result)
 	}
 	return normalRowStyle.Render(result)
+}
+
+func isActive(status watcher.IssueStatus) bool {
+	switch status {
+	case watcher.StatusReacted, watcher.StatusCloning, watcher.StatusCloneReady, watcher.StatusClaudeRunning:
+		return true
+	}
+	return false
 }
 
 func (m Model) statusIcon(status watcher.IssueStatus) string {
@@ -508,9 +475,7 @@ func (m Model) renderFooter() string {
 	switch m.focus {
 	case focusInput:
 		return footerStyle.Render(" Add repo: " + m.textInput.View())
-	case focusLogs:
-		return " " + helpLineLogs()
-	case focusDialog:
+	case focusDialog, focusHelp:
 		return " " + helpLineDialog()
 	case focusFocus:
 		return " " + helpLineFocus()
@@ -645,4 +610,50 @@ func (m Model) renderFocusView() string {
 	b.WriteString(" " + helpLineFocus())
 
 	return b.String()
+}
+
+func (m Model) renderHelpScreen() string {
+	var d strings.Builder
+	d.WriteString(dialogTitleStyle.Render("Keybindings"))
+	d.WriteString("\n\n")
+
+	section := func(title string, bindings [][2]string) {
+		d.WriteString(dialogLabelStyle.Render(title))
+		d.WriteString("\n")
+		for _, b := range bindings {
+			d.WriteString(fmt.Sprintf("  %s  %s\n",
+				footerKeyStyle.Render(fmt.Sprintf("%-8s", b[0])),
+				b[1]))
+		}
+		d.WriteString("\n")
+	}
+
+	section("Navigation", [][2]string{
+		{"j / k", "Move down / up"},
+		{"enter/l", "Expand repo / focus issue"},
+		{"f", "Focus view (full-screen logs)"},
+		{"i", "Info dialog"},
+		{"o", "Open in browser"},
+	})
+
+	section("Actions", [][2]string{
+		{"space", "Start / pause processing"},
+		{"a", "Approve & create PR"},
+		{"g", "Launch lazygit"},
+		{"c", "Launch Claude Code"},
+	})
+
+	section("Repos", [][2]string{
+		{"r", "Add repo"},
+		{"R / d", "Remove repo"},
+	})
+
+	section("General", [][2]string{
+		{"?", "Toggle this help"},
+		{"esc", "Back / close"},
+		{"q", "Quit"},
+	})
+
+	dialog := dialogStyle.Render(d.String())
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, dialog)
 }

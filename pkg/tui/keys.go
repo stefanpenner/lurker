@@ -8,26 +8,11 @@ func fmtHelp(key, action string) string {
 func helpLineNormal() string {
 	sep := footerSepStyle.Render("  |  ")
 	return fmtHelp("j/k", "navigate") + sep +
-		fmtHelp("enter/l", "expand") + sep +
+		fmtHelp("enter", "focus") + sep +
 		fmtHelp("space", "start/pause") + sep +
-		fmtHelp("f", "focus") + sep +
 		fmtHelp("r", "add repo") + sep +
-		fmtHelp("R", "remove") + sep +
-		fmtHelp("g", "lazygit") + sep +
-		fmtHelp("c", "claude") + sep +
-		fmtHelp("o", "open") + sep +
-		fmtHelp("i", "info") + sep +
 		fmtHelp("a", "approve") + sep +
-		fmtHelp("q", "quit")
-}
-
-func helpLineLogs() string {
-	sep := footerSepStyle.Render("  |  ")
-	return fmtHelp("j/k", "scroll") + sep +
-		fmtHelp("g/G", "top/bottom") + sep +
-		fmtHelp("esc", "back") + sep +
-		fmtHelp("o", "open issue") + sep +
-		fmtHelp("a", "approve PR") + sep +
+		fmtHelp("?", "help") + sep +
 		fmtHelp("q", "quit")
 }
 
