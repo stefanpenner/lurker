@@ -243,29 +243,29 @@ func (m Model) renderFooter() string {
 	}
 }
 
-// renderWithDialog overlays a dialog box on top of the main view.
-func (m Model) renderWithDialog(base string) string {
+// renderWithDialog renders a centered dialog, replacing the base view entirely.
+func (m Model) renderWithDialog(_ string) string {
 	iss := m.dialogIssue
 	if iss == nil {
-		return base
+		return ""
 	}
 
 	var d strings.Builder
 	d.WriteString(dialogTitleStyle.Render(fmt.Sprintf("Issue #%d", iss.Number)))
 	d.WriteString("\n\n")
-	d.WriteString(dialogLabelStyle.Render("Title: "))
+	d.WriteString(dialogLabelStyle.Render("Title:   "))
 	d.WriteString(iss.Title)
 	d.WriteString("\n")
-	d.WriteString(dialogLabelStyle.Render("Status: "))
+	d.WriteString(dialogLabelStyle.Render("Status:  "))
 	d.WriteString(iss.Status.String())
 	d.WriteString("\n")
 	if iss.Labels != "" {
-		d.WriteString(dialogLabelStyle.Render("Labels: "))
+		d.WriteString(dialogLabelStyle.Render("Labels:  "))
 		d.WriteString(iss.Labels)
 		d.WriteString("\n")
 	}
 	if iss.URL != "" {
-		d.WriteString(dialogLabelStyle.Render("URL: "))
+		d.WriteString(dialogLabelStyle.Render("URL:     "))
 		d.WriteString(iss.URL)
 		d.WriteString("\n")
 	}
@@ -290,34 +290,10 @@ func (m Model) renderWithDialog(base string) string {
 		d.WriteString(body)
 		d.WriteString("\n")
 	}
+	d.WriteString("\n")
+	d.WriteString(lipgloss.NewStyle().Foreground(colorSubtext).Render("esc close  o open in browser"))
 
 	dialog := dialogStyle.Render(d.String())
 
-	// Center the dialog over the base view
-	dialogLines := strings.Split(dialog, "\n")
-	baseLines := strings.Split(base, "\n")
-
-	startY := (len(baseLines) - len(dialogLines)) / 2
-	if startY < 0 {
-		startY = 0
-	}
-	startX := (m.width - lipgloss.Width(dialogLines[0])) / 2
-	if startX < 0 {
-		startX = 0
-	}
-
-	for i, dLine := range dialogLines {
-		row := startY + i
-		if row < len(baseLines) {
-			padded := baseLines[row]
-			// Overlay dialog line at startX
-			if startX < len(padded) {
-				baseLines[row] = padded[:startX] + dLine
-			} else {
-				baseLines[row] = strings.Repeat(" ", startX) + dLine
-			}
-		}
-	}
-
-	return strings.Join(baseLines, "\n")
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, dialog)
 }
