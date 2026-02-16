@@ -2,7 +2,9 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -14,11 +16,20 @@ import (
 
 const maxLogLines = 500
 
+// focus tracks which panel has keyboard focus.
+type focus int
+
+const (
+	focusList focus = iota
+	focusLogs
+)
+
 // Model is the Bubbletea model for the TUI dashboard.
 type Model struct {
 	issues      []watcher.TrackedIssue
 	logs        map[int][]string // per-issue log lines
 	cursor      int
+	focus       focus
 	logViewport viewport.Model
 	spinner     spinner.Model
 	width       int
@@ -39,6 +50,20 @@ type eventMsg watcher.Event
 
 // tickMsg triggers periodic event channel reads and time updates.
 type tickMsg struct{}
+
+// prResultMsg reports the result of an async PR creation.
+type prResultMsg struct {
+	issueNum int
+	url      string
+	err      error
+}
+
+// commitResultMsg reports the result of an async commit message generation.
+type commitResultMsg struct {
+	issueNum int
+	message  string
+	err      error
+}
 
 // NewModel creates a new TUI Model.
 func NewModel(repo string, eventCh <-chan watcher.Event) Model {
@@ -88,30 +113,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch {
-		case msg.String() == "q" || msg.String() == "ctrl+c":
-			return m, tea.Quit
-		case msg.String() == "j" || msg.String() == "down":
-			if m.cursor < len(m.issues)-1 {
-				m.cursor++
-				m.updateLogViewport()
-			}
-		case msg.String() == "k" || msg.String() == "up":
-			if m.cursor > 0 {
-				m.cursor--
-				m.updateLogViewport()
-			}
-		case msg.String() == "o":
-			m.openWorkdir()
-		case msg.String() == "d":
-			m.showDiff()
+		cmd := m.handleKey(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
 		m.logViewport.Width = msg.Width - 4
-		logHeight := msg.Height - 14 // leave room for header, table, footer
+		logHeight := msg.Height - 14
 		if logHeight < 3 {
 			logHeight = 3
 		}
@@ -130,9 +141,285 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		m.now = time.Now()
 		cmds = append(cmds, m.pollEvents())
+
+	case prResultMsg:
+		m.handlePRResult(msg)
+
+	case commitResultMsg:
+		m.handleCommitResult(msg)
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
+	key := msg.String()
+
+	// Global keys (work in both focus modes)
+	switch key {
+	case "q", "ctrl+c":
+		return tea.Quit
+	case "o":
+		m.openWorkdir()
+		return nil
+	case "d":
+		m.showDiff()
+		return nil
+	case "l":
+		return m.launchLazygit()
+	case "p":
+		return m.createPR()
+	case "c":
+		return m.generateCommit()
+	}
+
+	if m.focus == focusLogs {
+		switch key {
+		case "esc":
+			m.focus = focusList
+		case "j", "down":
+			m.logViewport.LineDown(1)
+		case "k", "up":
+			m.logViewport.LineUp(1)
+		case "g":
+			m.logViewport.GotoTop()
+		case "G":
+			m.logViewport.GotoBottom()
+		}
+	} else {
+		switch key {
+		case "enter":
+			m.focus = focusLogs
+			m.logViewport.GotoBottom()
+		case "j", "down":
+			if m.cursor < len(m.issues)-1 {
+				m.cursor++
+				m.updateLogViewport()
+			}
+		case "k", "up":
+			if m.cursor > 0 {
+				m.cursor--
+				m.updateLogViewport()
+			}
+		}
+	}
+
+	return nil
+}
+
+func (m *Model) selectedIssue() *watcher.TrackedIssue {
+	if m.cursor >= 0 && m.cursor < len(m.issues) {
+		return &m.issues[m.cursor]
+	}
+	return nil
+}
+
+// launchLazygit suspends the TUI and opens lazygit in the issue's workdir.
+func (m *Model) launchLazygit() tea.Cmd {
+	iss := m.selectedIssue()
+	if iss == nil || iss.Workdir == "" {
+		return nil
+	}
+
+	c := exec.Command("lazygit")
+	c.Dir = iss.Workdir
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		return nil // just resume the TUI
+	})
+}
+
+// createPR pushes the branch and opens a PR via gh CLI.
+func (m *Model) createPR() tea.Cmd {
+	iss := m.selectedIssue()
+	if iss == nil || iss.Workdir == "" {
+		return nil
+	}
+
+	num := iss.Number
+	title := iss.Title
+	workdir := iss.Workdir
+	repo := m.repo
+
+	m.appendLog(num, "")
+	m.appendLog(num, "🚀 Creating PR...")
+	m.updateLogViewport()
+
+	return func() tea.Msg {
+		// Push the branch
+		cmd := exec.Command("git", "push", "-u", "origin", "HEAD")
+		cmd.Dir = workdir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return prResultMsg{issueNum: num, err: fmt.Errorf("git push failed: %s: %w", string(out), err)}
+		}
+
+		// Get branch name
+		cmd = exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+		cmd.Dir = workdir
+		branchOut, err := cmd.Output()
+		if err != nil {
+			return prResultMsg{issueNum: num, err: fmt.Errorf("getting branch: %w", err)}
+		}
+		branch := strings.TrimSpace(string(branchOut))
+
+		// Get commit log for body
+		cmd = exec.Command("git", "log", "--oneline", "main.."+branch)
+		cmd.Dir = workdir
+		logOut, _ := cmd.Output()
+
+		body := fmt.Sprintf("Fixes #%d\n\n## Commits\n```\n%s```\n\n🤖 Generated by issue-watcher agent", num, string(logOut))
+
+		// Create PR
+		prTitle := fmt.Sprintf("Fix #%d: %s", num, title)
+		cmd = exec.Command("gh", "pr", "create",
+			"--repo", repo,
+			"--title", prTitle,
+			"--body", body,
+			"--head", branch,
+		)
+		cmd.Dir = workdir
+
+		// Strip ANTHROPIC_API_KEY from env to avoid leaking
+		env := os.Environ()
+		filtered := make([]string, 0, len(env))
+		for _, e := range env {
+			if !strings.HasPrefix(e, "ANTHROPIC_API_KEY=") {
+				filtered = append(filtered, e)
+			}
+		}
+		cmd.Env = filtered
+
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return prResultMsg{issueNum: num, err: fmt.Errorf("gh pr create failed: %s: %w", string(out), err)}
+		}
+
+		url := strings.TrimSpace(string(out))
+		return prResultMsg{issueNum: num, url: url}
+	}
+}
+
+func (m *Model) handlePRResult(msg prResultMsg) {
+	if msg.err != nil {
+		m.appendLog(msg.issueNum, "❌ PR failed: "+msg.err.Error())
+	} else {
+		m.appendLog(msg.issueNum, "")
+		m.appendLog(msg.issueNum, "━━━ PR Created ━━━")
+		m.appendLog(msg.issueNum, "  "+msg.url)
+		m.appendLog(msg.issueNum, "━━━━━━━━━━━━━━━━━━")
+	}
+	m.updateLogViewport()
+}
+
+// generateCommit runs claude to write a commit message and commits.
+func (m *Model) generateCommit() tea.Cmd {
+	iss := m.selectedIssue()
+	if iss == nil || iss.Workdir == "" {
+		return nil
+	}
+
+	num := iss.Number
+	workdir := iss.Workdir
+
+	m.appendLog(num, "")
+	m.appendLog(num, "📝 Generating commit message...")
+	m.updateLogViewport()
+
+	return func() tea.Msg {
+		// Get the diff
+		cmd := exec.Command("git", "diff")
+		cmd.Dir = workdir
+		diffOut, err := cmd.Output()
+		if err != nil {
+			return commitResultMsg{issueNum: num, err: fmt.Errorf("git diff: %w", err)}
+		}
+
+		// Also get staged diff
+		cmd = exec.Command("git", "diff", "--cached")
+		cmd.Dir = workdir
+		stagedOut, _ := cmd.Output()
+
+		diff := string(diffOut) + string(stagedOut)
+		if strings.TrimSpace(diff) == "" {
+			// Maybe everything is already committed, check for untracked
+			cmd = exec.Command("git", "status", "--short")
+			cmd.Dir = workdir
+			statusOut, _ := cmd.Output()
+			if strings.TrimSpace(string(statusOut)) == "" {
+				return commitResultMsg{issueNum: num, err: fmt.Errorf("no changes to commit")}
+			}
+			diff = "Untracked files:\n" + string(statusOut)
+		}
+
+		// Truncate diff if very long
+		if len(diff) > 8000 {
+			diff = diff[:8000] + "\n... (truncated)"
+		}
+
+		prompt := fmt.Sprintf(`Write a concise git commit message for these changes.
+Return ONLY the commit message, nothing else. No markdown, no explanation.
+First line: short summary (max 72 chars).
+Then a blank line, then a brief body if needed.
+
+Diff:
+%s`, diff)
+
+		// Run claude to generate the message
+		claudeCmd := exec.Command("claude", "-p")
+		claudeCmd.Dir = workdir
+
+		// Strip env vars
+		env := os.Environ()
+		filtered := make([]string, 0, len(env))
+		for _, e := range env {
+			if !strings.HasPrefix(e, "ANTHROPIC_API_KEY=") &&
+				!strings.HasPrefix(e, "CLAUDECODE=") {
+				filtered = append(filtered, e)
+			}
+		}
+		claudeCmd.Env = filtered
+
+		claudeCmd.Stdin = strings.NewReader(prompt)
+		msgOut, err := claudeCmd.Output()
+		if err != nil {
+			return commitResultMsg{issueNum: num, err: fmt.Errorf("claude commit msg: %w", err)}
+		}
+
+		commitMsg := strings.TrimSpace(string(msgOut))
+		if commitMsg == "" {
+			return commitResultMsg{issueNum: num, err: fmt.Errorf("claude returned empty message")}
+		}
+
+		// Stage all changes
+		cmd = exec.Command("git", "add", "-A")
+		cmd.Dir = workdir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return commitResultMsg{issueNum: num, err: fmt.Errorf("git add: %s: %w", string(out), err)}
+		}
+
+		// Commit
+		cmd = exec.Command("git", "commit", "-m", commitMsg)
+		cmd.Dir = workdir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return commitResultMsg{issueNum: num, err: fmt.Errorf("git commit: %s: %w", string(out), err)}
+		}
+
+		return commitResultMsg{issueNum: num, message: commitMsg}
+	}
+}
+
+func (m *Model) handleCommitResult(msg commitResultMsg) {
+	if msg.err != nil {
+		m.appendLog(msg.issueNum, "❌ Commit failed: "+msg.err.Error())
+	} else {
+		m.appendLog(msg.issueNum, "")
+		m.appendLog(msg.issueNum, "━━━ Committed ━━━")
+		for _, line := range strings.Split(msg.message, "\n") {
+			m.appendLog(msg.issueNum, "  "+line)
+		}
+		m.appendLog(msg.issueNum, "━━━━━━━━━━━━━━━━━")
+		m.appendLog(msg.issueNum, "  Press 'p' to open a PR")
+	}
+	m.updateLogViewport()
 }
 
 func (m *Model) handleEvent(ev watcher.Event) {
@@ -183,10 +470,11 @@ func (m *Model) handleEvent(ev watcher.Event) {
 		m.readyCount++
 		m.appendLog(ev.IssueNum, "")
 		m.appendLog(ev.IssueNum, "━━━ Ready for review ━━━")
-		m.appendLog(ev.IssueNum, "  Workdir: "+ev.Text)
-		m.appendLog(ev.IssueNum, "  Press 'o' to open in Finder")
-		m.appendLog(ev.IssueNum, "  Press 'd' to view diff")
-		m.appendLog(ev.IssueNum, "  cd "+ev.Text+" && git log --oneline -5")
+		m.appendLog(ev.IssueNum, "  l  lazygit — review & commit")
+		m.appendLog(ev.IssueNum, "  c  generate commit message")
+		m.appendLog(ev.IssueNum, "  d  view diff")
+		m.appendLog(ev.IssueNum, "  p  push & open PR")
+		m.appendLog(ev.IssueNum, "  o  open in Finder")
 		m.appendLog(ev.IssueNum, "━━━━━━━━━━━━━━━━━━━━━━━━")
 
 	case watcher.EventError:
@@ -269,31 +557,27 @@ func (m *Model) updateLogViewport() {
 }
 
 func (m *Model) openWorkdir() {
-	if m.cursor >= 0 && m.cursor < len(m.issues) {
-		dir := m.issues[m.cursor].Workdir
-		if dir != "" {
-			exec.Command("open", dir).Start()
-		}
+	if iss := m.selectedIssue(); iss != nil && iss.Workdir != "" {
+		exec.Command("open", iss.Workdir).Start()
 	}
 }
 
 func (m *Model) showDiff() {
-	if m.cursor >= 0 && m.cursor < len(m.issues) {
-		dir := m.issues[m.cursor].Workdir
-		if dir != "" {
-			cmd := exec.Command("git", "diff")
-			cmd.Dir = dir
-			out, err := cmd.Output()
-			if err == nil {
-				num := m.issues[m.cursor].Number
-				m.appendLog(num, "--- git diff ---")
-				for _, line := range splitLines(string(out)) {
-					m.appendLog(num, line)
-				}
-				m.appendLog(num, "--- end diff ---")
-				m.updateLogViewport()
-			}
+	iss := m.selectedIssue()
+	if iss == nil || iss.Workdir == "" {
+		return
+	}
+
+	cmd := exec.Command("git", "diff")
+	cmd.Dir = iss.Workdir
+	out, err := cmd.Output()
+	if err == nil {
+		m.appendLog(iss.Number, "--- git diff ---")
+		for _, line := range splitLines(string(out)) {
+			m.appendLog(iss.Number, line)
 		}
+		m.appendLog(iss.Number, "--- end diff ---")
+		m.updateLogViewport()
 	}
 }
 

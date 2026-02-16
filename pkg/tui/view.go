@@ -200,6 +200,9 @@ func (m Model) renderLogPanel() string {
 			header += " " + m.spinner.View()
 		}
 	}
+	if m.focus == focusLogs {
+		header += "  (scrolling — esc to go back)"
+	}
 	b.WriteString(logHeaderStyle.Render(header))
 	b.WriteString("\n")
 	b.WriteString(m.logViewport.View())
@@ -209,5 +212,8 @@ func (m Model) renderLogPanel() string {
 }
 
 func (m Model) renderFooter() string {
-	return footerStyle.Render(keys.helpLine())
+	if m.focus == focusLogs {
+		return footerStyle.Render(helpLineLogs())
+	}
+	return footerStyle.Render(helpLineList())
 }
