@@ -1,0 +1,19 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "lurker_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/stefanpenner/lurker/cmd/lurker",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//pkg/tui",
+        "//pkg/watcher",
+        "@com_github_charmbracelet_bubbletea//:bubbletea",
+    ],
+)
+
+go_binary(
+    name = "lurker",
+    embed = [":lurker_lib"],
+    visibility = ["//visibility:public"],
+)

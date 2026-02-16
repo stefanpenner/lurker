@@ -2,68 +2,120 @@ package tui
 
 import "github.com/charmbracelet/lipgloss"
 
-// Catppuccin Mocha-inspired palette.
+// TokyoNight color palette (LazyVim default).
 var (
-	colorBase     = lipgloss.Color("#1e1e2e")
-	colorSurface0 = lipgloss.Color("#313244")
-	colorSurface1 = lipgloss.Color("#45475a")
-	colorOverlay0 = lipgloss.Color("#6c7086")
-	colorText     = lipgloss.Color("#cdd6f4")
-	colorSubtext  = lipgloss.Color("#a6adc8")
-	colorGreen    = lipgloss.Color("#a6e3a1")
-	colorYellow   = lipgloss.Color("#f9e2af")
-	colorRed      = lipgloss.Color("#f38ba8")
-	colorBlue     = lipgloss.Color("#89b4fa")
-	colorMauve    = lipgloss.Color("#cba6f7")
-	colorTeal     = lipgloss.Color("#94e2d5")
-	colorPeach    = lipgloss.Color("#fab387")
+	colorBg       = lipgloss.Color("#1a1b26") // night background
+	colorBgDark   = lipgloss.Color("#16161e") // darker bg for status bar
+	colorBgHL     = lipgloss.Color("#292e42") // cursor line / selection
+	colorFg       = lipgloss.Color("#c0caf5") // main foreground
+	colorComment  = lipgloss.Color("#565f89") // muted / comments
+	colorDark3    = lipgloss.Color("#3b4261") // separator lines
+	colorBlue     = lipgloss.Color("#7aa2f7")
+	colorCyan     = lipgloss.Color("#7dcfff")
+	colorGreen    = lipgloss.Color("#9ece6a")
+	colorYellow   = lipgloss.Color("#e0af68")
+	colorRed      = lipgloss.Color("#f7768e")
+	colorMagenta  = lipgloss.Color("#bb9af7")
+	colorOrange   = lipgloss.Color("#ff9e64")
+	colorDimWhite = lipgloss.Color("#a9b1d6") // slightly dimmed fg
 )
+
+// -- Header / footer chrome --------------------------------------------------
 
 var (
 	headerStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(colorMauve).
-			PaddingLeft(1)
+			Foreground(colorMagenta)
+
+	headerDimStyle = lipgloss.NewStyle().
+			Foreground(colorComment)
 
 	statusBarStyle = lipgloss.NewStyle().
-			Foreground(colorSubtext).
-			PaddingLeft(1)
+			Foreground(colorComment)
 
-	selectedRowStyle = lipgloss.NewStyle().
-				Background(colorSurface1).
-				Foreground(colorText)
-
-	normalRowStyle = lipgloss.NewStyle().
-			Foreground(colorText)
-
-	logLineStyle = lipgloss.NewStyle().
-			Foreground(colorOverlay0)
-
-	logLineActiveStyle = lipgloss.NewStyle().
-				Foreground(colorSubtext)
+	// The thin separator line between sections.
+	separatorStyle = lipgloss.NewStyle().
+			Foreground(colorDark3)
 
 	footerStyle = lipgloss.NewStyle().
-			Foreground(colorSurface1).
-			PaddingLeft(1)
+			Foreground(colorComment)
 
+	footerKeyStyle = lipgloss.NewStyle().
+			Foreground(colorBlue)
+
+	footerSepStyle = lipgloss.NewStyle().
+			Foreground(colorDark3)
+)
+
+// -- Tree rows ---------------------------------------------------------------
+
+var (
+	selectedRowStyle = lipgloss.NewStyle().
+				Background(colorBgHL).
+				Foreground(colorFg)
+
+	normalRowStyle = lipgloss.NewStyle().
+			Foreground(colorFg)
+
+	repoNameStyle = lipgloss.NewStyle().
+			Foreground(colorCyan).
+			Bold(true)
+
+	repoNameErrStyle = lipgloss.NewStyle().
+				Foreground(colorRed).
+				Bold(true)
+
+	repoCountStyle = lipgloss.NewStyle().
+			Foreground(colorComment)
+)
+
+// -- Bead pipeline -----------------------------------------------------------
+
+var (
+	beadDone    = lipgloss.NewStyle().Foreground(colorGreen)
+	beadActive  = lipgloss.NewStyle().Foreground(colorYellow)
+	beadPending = lipgloss.NewStyle().Foreground(colorComment)
+	beadFailed  = lipgloss.NewStyle().Foreground(colorRed)
+	beadPaused  = lipgloss.NewStyle().Foreground(colorOrange)
+	beadLine    = lipgloss.NewStyle().Foreground(colorDark3)
+	beadLabel   = lipgloss.NewStyle().Foreground(colorComment)
+)
+
+// -- Issue status badges -----------------------------------------------------
+
+var (
+	statusReadyStyle     = lipgloss.NewStyle().Foreground(colorGreen)
+	statusReadyBoldStyle = lipgloss.NewStyle().Foreground(colorGreen).Bold(true)
+	statusRunningStyle   = lipgloss.NewStyle().Foreground(colorYellow)
+	statusFailedStyle    = lipgloss.NewStyle().Foreground(colorRed)
+	statusReactedStyle   = lipgloss.NewStyle().Foreground(colorBlue)
+	statusPausedStyle    = lipgloss.NewStyle().Foreground(colorOrange)
+)
+
+// -- Log lines ---------------------------------------------------------------
+
+var (
+	logLineStyle = lipgloss.NewStyle().
+			Foreground(colorComment)
+
+	logLineActiveStyle = lipgloss.NewStyle().
+				Foreground(colorDimWhite)
+)
+
+// -- Dialog ------------------------------------------------------------------
+
+var (
 	dialogStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(colorMauve).
+			BorderForeground(colorMagenta).
 			Padding(1, 2).
 			Width(70)
 
 	dialogTitleStyle = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(colorMauve)
+				Foreground(colorMagenta)
 
 	dialogLabelStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(colorBlue)
-
-	statusReadyStyle     = lipgloss.NewStyle().Foreground(colorGreen)
-	statusReadyBoldStyle = lipgloss.NewStyle().Foreground(colorGreen).Bold(true)
-	statusRunningStyle = lipgloss.NewStyle().Foreground(colorYellow)
-	statusFailedStyle  = lipgloss.NewStyle().Foreground(colorRed)
-	statusReactedStyle = lipgloss.NewStyle().Foreground(colorBlue)
-	statusPausedStyle  = lipgloss.NewStyle().Foreground(colorPeach)
 )

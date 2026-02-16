@@ -26,10 +26,9 @@ var claudeTools = strings.Join([]string{
 	`Bash(git log:*)`,
 }, ",")
 
-// BuildClaudePrompt creates the prompt for Claude Code given an issue.
-func BuildClaudePrompt(issue Issue) string {
-	return fmt.Sprintf(`You are working on the Chirp project (stefanpenner/chirp), a macOS menu bar
-app for offline speech-to-text.
+// BuildClaudePrompt creates the prompt for Claude Code given a repo and issue.
+func BuildClaudePrompt(repo string, issue Issue) string {
+	return fmt.Sprintf(`You are working on the %s project.
 
 ## Task
 Implement a fix or feature for GitHub issue #%d.
@@ -40,17 +39,16 @@ Implement a fix or feature for GitHub issue #%d.
 %s
 
 ## Instructions
-1. Read AGENTS.md and Architecture.md to understand the project.
+1. Read any AGENTS.md, CLAUDE.md, README.md, or Architecture.md to understand the project.
 2. Explore relevant source files.
-3. Implement changes following existing conventions (Swift 6, @Observable, actors).
-4. Run `+"`bazel test //...`"+` to verify.
-5. Add tests if appropriate (Swift Testing framework).
-6. Run `+"`bazel build //...`"+` to verify build.
-7. Commit with message "Fix #%d: <description>". Do NOT push.
+3. Implement changes following existing conventions.
+4. Run tests if a test framework is configured.
+5. Add tests if appropriate.
+6. Commit with message "Fix #%d: <description>". Do NOT push.
 
 If the issue is unclear or too large, commit a PLAN.md describing your
 analysis, proposed approach, and open questions.`,
-		issue.Number, issue.Title, issue.LabelNames(), issue.Body, issue.Number)
+		repo, issue.Number, issue.Title, issue.LabelNames(), issue.Body, issue.Number)
 }
 
 // Stream-json event types from claude --output-format stream-json.
@@ -214,13 +212,15 @@ func formatToolUse(block contentBlock) string {
 }
 
 // RunClaude invokes Claude Code in the given workdir with the given prompt.
-// It streams output line-by-line via logFn. Returns the full output on completion.
-func RunClaude(ctx context.Context, workdir string, prompt string, logFn LogFunc) (string, error) {
+// It streams output line-by-line via logFn. The tools parameter specifies
+// the allowed tools string; pass claudeTools for the default set.
+// Returns the full output on completion.
+func RunClaude(ctx context.Context, workdir string, prompt string, tools string, logFn LogFunc) (string, error) {
 	cmd := exec.CommandContext(ctx, "claude",
 		"-p",
 		"--output-format", "stream-json",
 		"--verbose",
-		"--allowedTools", claudeTools,
+		"--allowedTools", tools,
 	)
 	cmd.Dir = workdir
 

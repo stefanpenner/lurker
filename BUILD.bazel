@@ -1,0 +1,9 @@
+load("@gazelle//:def.bzl", "gazelle")
+
+# gazelle:prefix github.com/stefanpenner/lurker
+gazelle(name = "gazelle")
+
+alias(
+    name = "lurker",
+    actual = "//cmd/lurker",
+)

@@ -379,7 +379,12 @@ func (m *Manager) saveState() error {
 	if err != nil {
 		return fmt.Errorf("marshaling state: %w", err)
 	}
-	return os.WriteFile(m.statePath, data, 0o644)
+	// Atomic write: write to temp file then rename to avoid corruption on crash.
+	tmp := m.statePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("writing temp state: %w", err)
+	}
+	return os.Rename(tmp, m.statePath)
 }
 
 // Config holds watcher configuration.
@@ -499,15 +504,21 @@ func (w *Watcher) processIssue(ctx context.Context, eventCh chan<- Event, issue 
 		return
 	}
 
+	// Load per-repo config from .lurker/config.json if present
+	repoCfg := LoadRepoConfig(workdir)
+
 	// Run Claude
 	w.emit(eventCh, EventClaudeStart, num, "Running Claude Code...")
 
-	prompt := BuildClaudePrompt(issue)
+	prompt := BuildClaudePrompt(w.cfg.Repo, issue)
+	if repoCfg.PromptPrefix != "" {
+		prompt = repoCfg.PromptPrefix + "\n\n" + prompt
+	}
 	logFn := func(line string) {
 		w.emit(eventCh, EventClaudeLog, num, line)
 	}
 
-	_, err := RunClaude(ctx, workdir, prompt, logFn)
+	_, err := RunClaude(ctx, workdir, prompt, repoCfg.ClaudeTools(), logFn)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
@@ -522,29 +533,46 @@ func (w *Watcher) processIssue(ctx context.Context, eventCh chan<- Event, issue 
 }
 
 func (w *Watcher) cloneRepo(ctx context.Context, issueDir, workdir string, issueNum int) error {
+	bareDir := filepath.Join(w.cfg.BaseDir, w.cfg.Repo, "bare.git")
+
+	// Ensure bare clone exists
+	if _, err := os.Stat(bareDir); err != nil {
+		if err := os.MkdirAll(filepath.Dir(bareDir), 0o755); err != nil {
+			return fmt.Errorf("mkdir: %w", err)
+		}
+		cmd := exec.CommandContext(ctx, "gh", "repo", "clone", w.cfg.Repo, bareDir, "--", "--bare")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("bare clone: %s: %w", string(out), err)
+		}
+	} else {
+		// Fetch latest
+		cmd := exec.CommandContext(ctx, "git", "fetch", "origin")
+		cmd.Dir = bareDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("git fetch: %s: %w", string(out), err)
+		}
+	}
+
+	// If worktree already exists, just fetch
 	if _, err := os.Stat(workdir); err == nil {
 		cmd := exec.CommandContext(ctx, "git", "fetch", "origin")
 		cmd.Dir = workdir
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("git fetch: %s: %w", string(out), err)
+			return fmt.Errorf("worktree fetch: %s: %w", string(out), err)
 		}
 		return nil
 	}
 
+	// Create worktree with new branch
 	if err := os.MkdirAll(issueDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "gh", "repo", "clone", w.cfg.Repo, workdir)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("clone: %s: %w", string(out), err)
-	}
-
 	branch := fmt.Sprintf("agent/issue-%d", issueNum)
-	cmd = exec.CommandContext(ctx, "git", "checkout", "-b", branch)
-	cmd.Dir = workdir
+	cmd := exec.CommandContext(ctx, "git", "worktree", "add", "-b", branch, workdir)
+	cmd.Dir = bareDir
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("checkout: %s: %w", string(out), err)
+		return fmt.Errorf("worktree add: %s: %w", string(out), err)
 	}
 
 	return nil

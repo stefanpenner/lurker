@@ -1,0 +1,23 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "watcher",
+    srcs = [
+        "claude.go",
+        "config.go",
+        "issue.go",
+        "watcher.go",
+    ],
+    importpath = "github.com/stefanpenner/lurker/pkg/watcher",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "watcher_test",
+    srcs = [
+        "claude_test.go",
+        "issue_test.go",
+        "watcher_test.go",
+    ],
+    embed = [":watcher"],
+)

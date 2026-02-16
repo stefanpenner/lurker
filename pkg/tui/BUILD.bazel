@@ -1,0 +1,20 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "tui",
+    srcs = [
+        "keys.go",
+        "model.go",
+        "styles.go",
+        "view.go",
+    ],
+    importpath = "github.com/stefanpenner/lurker/pkg/tui",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/watcher",
+        "@com_github_charmbracelet_bubbles//spinner",
+        "@com_github_charmbracelet_bubbles//textinput",
+        "@com_github_charmbracelet_bubbletea//:bubbletea",
+        "@com_github_charmbracelet_lipgloss//:lipgloss",
+    ],
+)
