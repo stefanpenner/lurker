@@ -62,7 +62,6 @@ func RunClaude(ctx context.Context, workdir string, prompt string, logFn LogFunc
 		"--allowedTools", claudeTools,
 	)
 	cmd.Dir = workdir
-	cmd.Env = append(cmd.Environ(), "CLAUDE_CODE_ENTRYPOINT=cli")
 
 	// Pass prompt via stdin
 	stdinPipe, err := cmd.StdinPipe()
