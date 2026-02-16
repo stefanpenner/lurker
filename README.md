@@ -11,6 +11,8 @@ Add repos, lurk for new issues, dispatch Claude to fix them — review and merge
         │
 ```
 
+<img width="1242" height="740" alt="image" src="https://github.com/user-attachments/assets/e842f10b-bca7-45ed-b82e-aa2427c41eb9" />
+
 > **Warning** — Lurker is highly experimental, unstable, and unsafe. It runs AI agents that modify code, execute shell commands, and create pull requests on your behalf. Use at your own risk, in sandboxed environments, on repos you control. Do not point this at production repositories without understanding the consequences. There are no security guarantees. See [sec-ideas.md](sec-ideas.md) for the threat model.
 
 ## Install
