@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -62,6 +63,17 @@ func RunClaude(ctx context.Context, workdir string, prompt string, logFn LogFunc
 		"--allowedTools", claudeTools,
 	)
 	cmd.Dir = workdir
+
+	// Strip ANTHROPIC_API_KEY so claude -p uses OAuth/Max subscription
+	// instead of API credits
+	env := os.Environ()
+	filtered := make([]string, 0, len(env))
+	for _, e := range env {
+		if !strings.HasPrefix(e, "ANTHROPIC_API_KEY=") {
+			filtered = append(filtered, e)
+		}
+	}
+	cmd.Env = filtered
 
 	// Pass prompt via stdin
 	stdinPipe, err := cmd.StdinPipe()
