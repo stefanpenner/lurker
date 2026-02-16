@@ -3,6 +3,7 @@ package watcher
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -52,14 +53,145 @@ analysis, proposed approach, and open questions.`,
 		issue.Number, issue.Title, issue.LabelNames(), issue.Body, issue.Number)
 }
 
+// streamEvent represents a single JSON event from claude --output-format stream-json.
+type streamEvent struct {
+	Type       string          `json:"type"`
+	SubType    string          `json:"subtype,omitempty"`
+	Tool       string          `json:"tool,omitempty"`
+	Content    string          `json:"content,omitempty"`
+	Input      json.RawMessage `json:"input,omitempty"`
+	CostUSD    float64         `json:"cost_usd,omitempty"`
+	DurationMS float64         `json:"duration_ms,omitempty"`
+	// For assistant messages with content blocks
+	Message struct {
+		Content []contentBlock `json:"content,omitempty"`
+	} `json:"message,omitempty"`
+}
+
+type contentBlock struct {
+	Type  string `json:"type"`
+	Text  string `json:"text,omitempty"`
+	Name  string `json:"name,omitempty"`
+	Input struct {
+		Command  string `json:"command,omitempty"`
+		FilePath string `json:"file_path,omitempty"`
+		Pattern  string `json:"pattern,omitempty"`
+		Query    string `json:"query,omitempty"`
+	} `json:"input,omitempty"`
+}
+
 // LogFunc is called with each line of Claude's output.
 type LogFunc func(line string)
+
+// formatStreamEvent turns a stream-json event into a human-readable log line.
+// Returns empty string if the event should be suppressed.
+func formatStreamEvent(raw string) string {
+	var ev streamEvent
+	if err := json.Unmarshal([]byte(raw), &ev); err != nil {
+		return ""
+	}
+
+	switch ev.Type {
+	case "assistant":
+		// Text output from Claude
+		if ev.SubType == "text" && ev.Content != "" {
+			// Truncate long text to keep the log readable
+			text := ev.Content
+			if len(text) > 200 {
+				text = text[:200] + "…"
+			}
+			return text
+		}
+		// Tool use
+		if ev.SubType == "tool_use" {
+			return formatToolUse(ev)
+		}
+
+	case "tool_result", "result":
+		// Tool results can be very verbose, just note completion
+		if ev.SubType == "tool_result" {
+			return ""
+		}
+		if ev.Type == "result" {
+			cost := ""
+			if ev.CostUSD > 0 {
+				cost = fmt.Sprintf(" ($%.4f)", ev.CostUSD)
+			}
+			dur := ""
+			if ev.DurationMS > 0 {
+				secs := ev.DurationMS / 1000
+				if secs >= 60 {
+					dur = fmt.Sprintf(" (%.0fm%.0fs)", secs/60, float64(int(secs)%60))
+				} else {
+					dur = fmt.Sprintf(" (%.1fs)", secs)
+				}
+			}
+			return fmt.Sprintf("✓ Done%s%s", dur, cost)
+		}
+
+	case "system":
+		if ev.SubType == "init" {
+			return "Claude session initialized"
+		}
+		return ""
+	}
+
+	return ""
+}
+
+func formatToolUse(ev streamEvent) string {
+	tool := ev.Tool
+	if tool == "" {
+		// Try to parse from content
+		return ""
+	}
+
+	// Parse the input to get useful details
+	var input struct {
+		Command  string `json:"command"`
+		FilePath string `json:"file_path"`
+		Pattern  string `json:"pattern"`
+		Path     string `json:"path"`
+		OldStr   string `json:"old_string"`
+		Content  string `json:"content"`
+	}
+	if ev.Input != nil {
+		json.Unmarshal(ev.Input, &input)
+	}
+
+	switch tool {
+	case "Read":
+		return fmt.Sprintf("📖 Read %s", input.FilePath)
+	case "Write":
+		return fmt.Sprintf("📝 Write %s", input.FilePath)
+	case "Edit":
+		path := input.FilePath
+		return fmt.Sprintf("✏️  Edit %s", path)
+	case "Glob":
+		return fmt.Sprintf("🔍 Glob %s", input.Pattern)
+	case "Grep":
+		p := input.Pattern
+		if len(p) > 50 {
+			p = p[:50] + "…"
+		}
+		return fmt.Sprintf("🔍 Grep %q", p)
+	case "Bash":
+		cmd := input.Command
+		if len(cmd) > 80 {
+			cmd = cmd[:80] + "…"
+		}
+		return fmt.Sprintf("$ %s", cmd)
+	default:
+		return fmt.Sprintf("🔧 %s", tool)
+	}
+}
 
 // RunClaude invokes Claude Code in the given workdir with the given prompt.
 // It streams output line-by-line via logFn. Returns the full output on completion.
 func RunClaude(ctx context.Context, workdir string, prompt string, logFn LogFunc) (string, error) {
 	cmd := exec.CommandContext(ctx, "claude",
 		"-p",
+		"--output-format", "stream-json",
 		"--allowedTools", claudeTools,
 	)
 	cmd.Dir = workdir
@@ -103,7 +235,7 @@ func RunClaude(ctx context.Context, workdir string, prompt string, logFn LogFunc
 
 	var output strings.Builder
 
-	// Read stdout in a goroutine
+	// Read stderr in a goroutine
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
@@ -117,14 +249,18 @@ func RunClaude(ctx context.Context, workdir string, prompt string, logFn LogFunc
 		}
 	}()
 
+	// Parse stream-json events from stdout
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
-		line := scanner.Text()
-		output.WriteString(line)
+		raw := scanner.Text()
+		output.WriteString(raw)
 		output.WriteString("\n")
+
 		if logFn != nil {
-			logFn(line)
+			if line := formatStreamEvent(raw); line != "" {
+				logFn(line)
+			}
 		}
 	}
 
