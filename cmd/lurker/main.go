@@ -10,8 +10,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/stefanpenner/issue-watcher/pkg/tui"
-	"github.com/stefanpenner/issue-watcher/pkg/watcher"
+	"github.com/stefanpenner/lurker/pkg/tui"
+	"github.com/stefanpenner/lurker/pkg/watcher"
 )
 
 func main() {
@@ -26,7 +26,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-		*baseDir = filepath.Join(home, ".local", "share", "issue-watcher")
+		*baseDir = filepath.Join(home, ".local", "share", "lurker")
 	}
 
 	cfg := watcher.Config{

@@ -6,7 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/stefanpenner/issue-watcher/pkg/watcher"
+	"github.com/stefanpenner/lurker/pkg/watcher"
 )
 
 func (m Model) View() string {
@@ -41,7 +41,7 @@ func (m Model) View() string {
 }
 
 func (m Model) renderHeader() string {
-	title := headerStyle.Render("issue-watcher")
+	title := headerStyle.Render("lurker")
 	repo := lipgloss.NewStyle().Foreground(colorTeal).Render(m.repo)
 
 	left := fmt.Sprintf(" %s  %s", title, repo)

@@ -1,4 +1,4 @@
-module github.com/stefanpenner/issue-watcher
+module github.com/stefanpenner/lurker
 
 go 1.24.2
 

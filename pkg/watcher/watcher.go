@@ -2,7 +2,6 @@ package watcher
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -83,11 +82,6 @@ type TrackedIssue struct {
 	StartedAt time.Time
 }
 
-// persistedState is saved to state.json to remember processed issues across runs.
-type persistedState struct {
-	Processed []int `json:"processed"`
-}
-
 // Config holds watcher configuration.
 type Config struct {
 	Repo         string
@@ -97,9 +91,7 @@ type Config struct {
 
 // Watcher polls GitHub for new issues and orchestrates processing.
 type Watcher struct {
-	cfg       Config
-	processed map[int]bool
-	stateFile string
+	cfg Config
 }
 
 // New creates a new Watcher.
@@ -110,40 +102,16 @@ func New(cfg Config) (*Watcher, error) {
 		return nil, fmt.Errorf("creating workdir: %w", err)
 	}
 
-	w := &Watcher{
-		cfg:       cfg,
-		processed: make(map[int]bool),
-		stateFile: filepath.Join(repoDir, "state.json"),
-	}
-
-	w.loadState()
-	return w, nil
+	return &Watcher{cfg: cfg}, nil
 }
 
-func (w *Watcher) loadState() {
-	data, err := os.ReadFile(w.stateFile)
-	if err != nil {
-		return // no state file yet, that's fine
-	}
-	var state persistedState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return
-	}
-	for _, n := range state.Processed {
-		w.processed[n] = true
-	}
-}
-
-func (w *Watcher) saveState() error {
-	state := persistedState{}
-	for n := range w.processed {
-		state.Processed = append(state.Processed, n)
-	}
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(w.stateFile, data, 0o644)
+// isProcessed checks whether an issue has already been processed by looking
+// for its workdir on disk — the directory is created during cloneRepo, so its
+// existence is the source of truth.
+func (w *Watcher) isProcessed(issueNum int) bool {
+	issueDir := filepath.Join(w.cfg.BaseDir, w.cfg.Repo, fmt.Sprintf("%d", issueNum))
+	_, err := os.Stat(issueDir)
+	return err == nil
 }
 
 func (w *Watcher) emit(ch chan<- Event, kind EventKind, issueNum int, text string) {
@@ -185,7 +153,7 @@ func (w *Watcher) poll(ctx context.Context, eventCh chan<- Event) {
 
 	var newIssues []Issue
 	for _, iss := range issues {
-		if !w.processed[iss.Number] {
+		if !w.isProcessed(iss.Number) {
 			newIssues = append(newIssues, iss)
 		}
 	}
@@ -202,10 +170,6 @@ func (w *Watcher) poll(ctx context.Context, eventCh chan<- Event) {
 
 func (w *Watcher) processIssue(ctx context.Context, eventCh chan<- Event, issue Issue) {
 	num := issue.Number
-
-	// Mark as processed immediately to avoid re-processing
-	w.processed[num] = true
-	_ = w.saveState()
 
 	eventCh <- Event{
 		Kind:        EventIssueFound,
