@@ -60,10 +60,15 @@ func RunClaude(ctx context.Context, workdir string, prompt string, logFn LogFunc
 	cmd := exec.CommandContext(ctx, "claude",
 		"-p",
 		"--allowedTools", claudeTools,
-		prompt,
 	)
 	cmd.Dir = workdir
 	cmd.Env = append(cmd.Environ(), "CLAUDE_CODE_ENTRYPOINT=cli")
+
+	// Pass prompt via stdin
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		return "", fmt.Errorf("stdin pipe: %w", err)
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -78,6 +83,12 @@ func RunClaude(ctx context.Context, workdir string, prompt string, logFn LogFunc
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("starting claude: %w", err)
 	}
+
+	// Write prompt and close stdin
+	go func() {
+		defer stdinPipe.Close()
+		stdinPipe.Write([]byte(prompt))
+	}()
 
 	var output strings.Builder
 
