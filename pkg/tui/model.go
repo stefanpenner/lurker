@@ -195,7 +195,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.cursor--
 			m.ensureCursorVisible()
 		}
-	case "l":
+	case "l", "enter":
 		m.toggleLogs()
 	case "tab":
 		// If expanded, enter log scroll mode
