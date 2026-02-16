@@ -3,6 +3,8 @@
 **An autonomous GitHub issue watcher powered by Claude Code.**
 Add repos, lurk for new issues, dispatch Claude to fix them — review and merge from your terminal. No babysitting required.
 
+Think tmux for your issues — each one gets its own real PTY session. Press `c` for Claude, `s` for a shell, `g` for lazygit — then `Ctrl+]` to pop back out.
+
 ```
      ╭─────╮
      │ ◉ ◉ │
