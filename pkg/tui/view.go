@@ -370,15 +370,11 @@ func (m Model) renderIssueLine(iss watcher.TrackedIssue, selected bool) string {
 	// Compact bead pipeline (9 chars visual: "x-x-x-o-o")
 	beadStr := m.renderBeadsCompact(iss.Status)
 
-	// Elapsed time (with spinner prefix for active statuses)
+	// Elapsed time — only shown for actively running statuses
 	var elapsedStr string
-	if iss.Status != watcher.StatusPending {
+	if isActive(iss.Status) {
 		el := elapsed(iss.StartedAt, m.now)
-		if isActive(iss.Status) {
-			elapsedStr = m.spinner.View() + " " + el
-		} else {
-			elapsedStr = el
-		}
+		elapsedStr = m.spinner.View() + " " + el
 	}
 
 	// Issue reference
